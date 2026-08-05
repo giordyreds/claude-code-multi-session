@@ -2,8 +2,9 @@ import type { SettingsValue } from "./settings.js";
 
 /** Mirrors registry.ts's `DEFAULT_INSTALL_ALIAS` — an unbound Session must show this explicit
  * marker rather than nothing, so a missing indicator is never ambiguous with being unbound
- * (ticket #10's acceptance criteria, ADR-0003). Not imported directly: this string is embedded in
- * a shell snippet, not evaluated as TypeScript, so the two are kept in sync by hand. */
+ * (ticket #10's acceptance criteria, ADR-0003). Not imported directly: `registry.ts` already
+ * imports `settings.ts` (to render each Profile's settings file), which imports this module, so
+ * importing `registry.ts` back from here would close that into a cycle. Kept in sync by hand. */
 const DEFAULT_INSTALL_ALIAS = "(default)";
 
 /** A settings file's `statusLine` value, per Claude Code's own schema — the one shape this

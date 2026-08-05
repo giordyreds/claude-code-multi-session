@@ -241,8 +241,16 @@ async function runUse(
 
   await reportDriftAndUpdateRegistry(deps, alias, record, status);
 
-  deps.stdout(`export CLAUDE_CONFIG_DIR="${record.configDir}"`);
+  deps.stdout(`export CLAUDE_CONFIG_DIR=${shellQuote(record.configDir)}`);
   return 0;
+}
+
+/** Single-quotes `value` for safe `sh`/`zsh` evaluation — the only shape of output ADR-0004
+ * permits on stdout. `configDir` is built from an Alias (`registry.ts`'s `isValidAlias` only
+ * rejects path traversal, not shell metacharacters), so an unescaped interpolation here would let
+ * an Alias like `foo"; rm -rf ~ #` break out of the `export` line the `ccp` shell function evals. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**

@@ -526,7 +526,7 @@ describe("runCli use", () => {
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
-    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR="${configDir}"`]);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
     expect(claudePort.calls).toEqual([configDir]);
     // Never authenticates or opens a browser (CONTEXT.md's Binding, distinct from Login).
     expect(claudePort.loginCalls).toEqual([]);
@@ -542,7 +542,7 @@ describe("runCli use", () => {
     const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
     expect(code).toBe(0);
-    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR="${configDir}"`]);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
     expect(stderr.join("\n")).toMatch(/not logged in/i);
   });
 
@@ -563,7 +563,7 @@ describe("runCli use", () => {
 
     expect(code).toBe(0);
     // Drift is a warning, never a block — Binding still succeeds.
-    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR="${configDir}"`]);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
     const report = stderr.join("\n");
     expect(report).toMatch(/drift/i);
     expect(report).toMatch(/work@example\.com/);
@@ -646,6 +646,26 @@ describe("runCli use", () => {
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/ENOENT/);
+  });
+
+  it("single-quotes the export line so an Alias containing shell metacharacters can't break out of it", async () => {
+    // isValidAlias (registry.ts) only rejects path traversal, not shell metacharacters, so an
+    // Alias like this one is accepted and becomes part of configDir. If the export line were ever
+    // interpolated unescaped, `ccp.sh`'s `eval` would run whatever came after the injected quote.
+    const alias = `foo"; echo pwned; echo "`;
+    await runCli(["add", alias], { stateDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles[alias]!;
+
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["use", alias], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir.replace(/'/g, `'\\''`)}'`]);
+    // The whole value sits inside one pair of single quotes: `eval`-ing it can only ever set
+    // CLAUDE_CONFIG_DIR, never run a second, injected command.
+    expect(stdout[0]!.match(/'/g)?.length).toBe(2);
   });
 });
 
