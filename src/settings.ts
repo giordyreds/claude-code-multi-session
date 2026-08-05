@@ -41,6 +41,10 @@ export interface RenderSettingsResult {
   /** The full rendered content, including {@link GENERATED_MARKER_KEY}, exactly as verified
    * on disk by parsing it back. */
   settings: SettingsValue;
+  /** Whether this render actually wrote the file — false when the newly computed content is
+   * identical to what was already there (base and override unchanged since the last render), so
+   * `ccp sync` can report "no changes" on a repeat run instead of a write that changed nothing. */
+  changed: boolean;
 }
 
 /**
@@ -80,13 +84,17 @@ export async function renderSettings(options: RenderSettingsOptions): Promise<Re
   const marker: GeneratedMarker = { snapshot: merged };
   const rendered: SettingsValue = { ...preserved, ...merged, [GENERATED_MARKER_KEY]: marker };
 
+  if (existing && deepEqual(existing, rendered)) {
+    return { settings: rendered, changed: false };
+  }
+
   await mkdir(dirname(options.outputSettingsPath), { recursive: true });
   const serialized = `${JSON.stringify(rendered, null, 2)}\n`;
   await writeFile(options.outputSettingsPath, serialized, "utf8");
 
   await verifyRoundTrip(options.outputSettingsPath, rendered);
 
-  return { settings: rendered };
+  return { settings: rendered, changed: true };
 }
 
 /**

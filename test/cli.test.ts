@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -863,6 +863,122 @@ describe("runCli reconcile", () => {
     expect(code).toBe(0);
     const registry = await loadRegistry(stateDir);
     expect(registry.profiles.personal?.expectedIdentity).toEqual({ email: "me@example.com", orgName: "Personal Org" });
+  });
+});
+
+describe("runCli sync", () => {
+  let stateDir: string;
+  let installDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-sync-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-sync-install-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
+  });
+
+  it("reports nothing to sync when no Profile is registered", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["sync"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/no profiles/i);
+  });
+
+  it("renders settings for every Profile from the current base and overrides", async () => {
+    await writeFile(join(installDir, "settings.json"), JSON.stringify({ model: "sonnet" }), "utf8");
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+    await writeFile(join(configDir, "settings.override.json"), JSON.stringify({ model: "opus" }), "utf8");
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["sync"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/work:.*settings re-rendered/i);
+
+    const rendered = JSON.parse(await readFile(join(configDir, "settings.json"), "utf8"));
+    expect(rendered.model).toBe("opus");
+  });
+
+  it("repairs a broken Rig symlink and reports it", async () => {
+    await writeFile(join(installDir, "CLAUDE.md"), "# Instructions", "utf8");
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+    // Simulate broken Rig sharing: point the symlink somewhere stale.
+    await rm(join(configDir, "CLAUDE.md"));
+    await writeFile(join(installDir, "stale.md"), "old", "utf8");
+    await symlink(join(installDir, "stale.md"), join(configDir, "CLAUDE.md"));
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["sync"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/work:.*Rig repaired \(CLAUDE\.md\)/i);
+    expect(await readlink(join(configDir, "CLAUDE.md"))).toBe(join(installDir, "CLAUDE.md"));
+  });
+
+  it("reports no changes for a Profile that's already fully in sync", async () => {
+    await writeFile(join(installDir, "settings.json"), JSON.stringify({ model: "sonnet" }), "utf8");
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+
+    await runCli(["sync"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["sync"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout).toEqual(["work: no changes"]);
+  });
+
+  it("refuses to clobber a hand-edited settings file, reporting the Profile skipped rather than crashing the whole run", async () => {
+    await writeFile(join(installDir, "settings.json"), JSON.stringify({ model: "sonnet" }), "utf8");
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "personal"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["sync"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+    const onDisk = JSON.parse(await readFile(join(configDir, "settings.json"), "utf8"));
+    onDisk.model = "hand-edited";
+    const handEdited = JSON.stringify(onDisk);
+    await writeFile(join(configDir, "settings.json"), handEdited, "utf8");
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["sync"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout.join("\n")).toMatch(/work: SKIPPED.*hand-edited/i);
+    // The other Profile still syncs — one broken Profile doesn't take down the whole run.
+    expect(stdout.join("\n")).toMatch(/personal: no changes/i);
+    // Never clobbered.
+    await expect(readFile(join(configDir, "settings.json"), "utf8")).resolves.toBe(handEdited);
+  });
+
+  it("running it twice in a row reports no changes the second time", async () => {
+    await writeFile(join(installDir, "settings.json"), JSON.stringify({ model: "sonnet" }), "utf8");
+    await mkdir(join(installDir, "skills"));
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "personal"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+
+    const first = captureLines();
+    const firstCode = await runCli(["sync"], { stateDir, installDir, stdout: first.stdoutFn, stderr: first.stderrFn });
+    expect(firstCode).toBe(0);
+
+    const second = captureLines();
+    const secondCode = await runCli(["sync"], { stateDir, installDir, stdout: second.stdoutFn, stderr: second.stderrFn });
+
+    expect(secondCode).toBe(0);
+    expect(second.stderr).toEqual([]);
+    expect(second.stdout).toEqual(["personal: no changes\nwork: no changes"]);
   });
 });
 
