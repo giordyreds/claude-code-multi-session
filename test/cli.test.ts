@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
+import { loadRegistry } from "../src/registry.js";
 
 /** Captures every line written to stdout/stderr, in order, for assertion. */
 function captureLines(): { stdout: string[]; stderr: string[]; stdoutFn: (line: string) => void; stderrFn: (line: string) => void } {
@@ -149,5 +150,120 @@ describe("runCli whoami", () => {
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/ENOENT/);
+  });
+});
+
+describe("runCli add", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-add-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("creates a Profile and registers its Alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["add", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/work/);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toBeDefined();
+    expect(registry.profiles.work?.expectedIdentity).toBeNull();
+  });
+
+  it("rejects a duplicate Alias with an actionable message on stderr and changes nothing", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    const registryBefore = await loadRegistry(stateDir);
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["add", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/work/i);
+
+    const registryAfter = await loadRegistry(stateDir);
+    expect(registryAfter).toEqual(registryBefore);
+  });
+
+  it("requires an alias argument", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["add"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/alias/i);
+  });
+
+  it("rejects '(default)' as an Alias since it's reserved for the Default install", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["add", "(default)"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/reserved/i);
+  });
+});
+
+describe("runCli ls", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-ls-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("lists a never-logged-in Profile alongside the Default install, marked unmanaged", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    const report = stdout.join("\n");
+    expect(report).toMatch(/\bwork\b/);
+    expect(report).toMatch(/never logged in/i);
+    expect(report).toMatch(/\(default\)/);
+    expect(report).toMatch(/dev@example\.com/);
+    expect(report).toMatch(/unmanaged/i);
+    // The Default install row is asked about via the ambient environment, no directory override.
+    expect(claudePort.calls).toEqual([undefined]);
+  });
+
+  it("lists the Default install even when no Profile has been added yet", async () => {
+    const claudePort = fakeClaudePort({ loggedIn: false });
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/\(default\)/);
+  });
+
+  it("produces an actionable error, not a crash, when the registry file is malformed", async () => {
+    await writeFile(join(stateDir, "registry.json"), "not json", "utf8");
+    const claudePort = fakeClaudePort({ loggedIn: false });
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/registry/i);
   });
 });
