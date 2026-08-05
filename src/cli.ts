@@ -2,18 +2,22 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
-import { configDirFor, recordExpectedIdentity } from "./registry.js";
+import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity } from "./registry.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami          Report the bound Profile's identity\n  login <alias>   Authenticate a Profile and record its resulting identity";
+  "Usage: ccp <command>\n\nCommands:\n  whoami          Report the bound Profile's identity\n  add <alias>     Create a new Profile\n  ls              List every Profile\n  login <alias>   Authenticate a Profile and record its resulting identity";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
 
-/** The Alias {@link resolveBinding} reports as `"(default)"` for an unbound shell isn't a real Alias — it's this sentinel, matching CONTEXT.md's Default install language. */
-const DEFAULT_INSTALL_ALIAS = "(default)";
-
 const NOT_LOGGED_IN = "(not logged in)";
+const NEVER_LOGGED_IN = "(never logged in)";
 const UNKNOWN = "(unknown)";
+
+/** The tool's own state directory: holds the Profile registry and every managed Profile's
+ * isolated config directory. */
+function defaultStateDir(): string {
+  return join(homedir(), ".ccacct");
+}
 
 export interface RunCliOptions {
   /** The shell environment to resolve Binding from. Defaults to `process.env`. */
@@ -26,11 +30,8 @@ export interface RunCliOptions {
    * Defaults to a real {@link ClaudeCliPort}.
    */
   claudePort?: ClaudePort;
-  /**
-   * The tool's own state directory, holding every managed Profile's config directory and the
-   * registry file (ADR-0006). Test seam so registry reads/writes never touch a real home
-   * directory. Defaults to `~/.ccacct`.
-   */
+  /** Test seam: the tool's own state directory, holding the Profile registry and every managed
+   * Profile's isolated config directory. Defaults to `~/.ccacct`. */
   stateDir?: string;
 }
 
@@ -43,7 +44,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const stdout = options.stdout ?? ((line: string) => console.log(line));
   const stderr = options.stderr ?? ((line: string) => console.error(line));
   const claudePort = options.claudePort ?? new ClaudeCliPort();
-  const stateDir = options.stateDir ?? join(homedir(), ".ccacct");
+  const stateDir = options.stateDir ?? defaultStateDir();
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -53,6 +54,10 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   switch (argv[0]) {
     case "whoami":
       return runWhoami({ env, stdout, stderr, claudePort });
+    case "add":
+      return runAdd({ alias: argv[1], stateDir, stdout, stderr });
+    case "ls":
+      return runLs({ stateDir, stdout, stderr, claudePort });
     case "login":
       return runLogin(argv.slice(1), { stateDir, stdout, stderr, claudePort });
     default:
@@ -80,11 +85,18 @@ async function runWhoami(deps: {
   try {
     status = await deps.claudePort.authStatus(configDir);
   } catch (err) {
-    return reportFailure(deps.stderr, err);
+    return reportError(deps.stderr, err);
   }
 
   deps.stdout(formatIdentity(alias, status));
   return 0;
+}
+
+/** Prints an error's message to `stderr` and resolves the standard failure exit code — the one
+ * shape every command's fallible step reports through. */
+function reportError(stderr: (line: string) => void, err: unknown): number {
+  stderr(err instanceof Error ? err.message : String(err));
+  return 1;
 }
 
 /**
@@ -92,6 +104,11 @@ async function runWhoami(deps: {
  * scoped to the named Profile's own config directory, then records the resulting Account and
  * Organization as that Profile's expected identity (ADR-0006). Never called by any other
  * command — Login stays explicit precisely because it opens a browser (CONTEXT.md's Login).
+ *
+ * `alias` need not have gone through `ccp add` beforehand — an alias with no existing registry
+ * entry is provisioned by `addProfile` on the spot, so `ccp login` still works standalone. An
+ * alias `ccp add` already created is reused as-is, so logging in never disturbs a Profile's
+ * existing (and possibly already-populated) registry entry beyond its Expected identity.
  */
 async function runLogin(
   args: string[],
@@ -110,22 +127,24 @@ async function runLogin(
 
   let configDir: string;
   try {
-    configDir = configDirFor(deps.stateDir, alias);
+    const registry = await loadRegistry(deps.stateDir);
+    const existing = registry.profiles[alias];
+    configDir = existing ? existing.configDir : (await addProfile(deps.stateDir, alias)).configDir;
   } catch (err) {
-    return reportFailure(deps.stderr, err);
+    return reportError(deps.stderr, err);
   }
 
   try {
     await deps.claudePort.login(configDir);
   } catch (err) {
-    return reportFailure(deps.stderr, err);
+    return reportError(deps.stderr, err);
   }
 
   let status: AuthStatus;
   try {
     status = await deps.claudePort.authStatus(configDir);
   } catch (err) {
-    return reportFailure(deps.stderr, err);
+    return reportError(deps.stderr, err);
   }
 
   if (!status.loggedIn) {
@@ -148,12 +167,6 @@ async function runLogin(
   return 0;
 }
 
-/** Reports an error to stderr and resolves the exit code every failure path in this file shares. */
-function reportFailure(stderr: (line: string) => void, err: unknown): number {
-  stderr(err instanceof Error ? err.message : String(err));
-  return 1;
-}
-
 /**
  * Renders an identity report shared by `whoami` and `login`. Account/Organization fall back to
  * an explicit `(not logged in)` — a Profile can be Bound but not logged in (CONTEXT.md's Login)
@@ -166,4 +179,80 @@ function formatIdentity(alias: string, status: AuthStatus): string {
   const account = !status.loggedIn ? NOT_LOGGED_IN : status.email ?? UNKNOWN;
   const organization = !status.loggedIn ? NOT_LOGGED_IN : status.orgName ?? UNKNOWN;
   return [`Alias:        ${alias}`, `Account:      ${account}`, `Organization: ${organization}`].join("\n");
+}
+
+/**
+ * `ccp add <alias>`: creates a Profile with its own isolated config directory under the tool's
+ * state directory and registers its Alias. Alias validity — uniqueness, and the reserved
+ * {@link DEFAULT_INSTALL_ALIAS} sentinel — is enforced by {@link addProfile} itself, so a
+ * rejection here always means the registry was left exactly as it was.
+ */
+async function runAdd(deps: {
+  alias: string | undefined;
+  stateDir: string;
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
+}): Promise<number> {
+  const { alias } = deps;
+  if (!alias) {
+    deps.stderr("Usage: ccp add <alias>");
+    return 1;
+  }
+
+  try {
+    const result = await addProfile(deps.stateDir, alias);
+    deps.stdout(`Created Profile '${result.alias}' at ${result.configDir}`);
+    return 0;
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+}
+
+/**
+ * `ccp ls`: lists every managed Profile with its recorded Expected identity, or an explicit
+ * never-logged-in state (CONTEXT.md's Login hasn't happened yet for any Profile this tool can
+ * create), followed by the Default install's row. Per ADR-0003, that row is never migrated or
+ * mutated and must show its real, live identity rather than a blank — the whole reason `ccp ls`
+ * exists is to stop the expensive account from being used by accident.
+ */
+async function runLs(deps: {
+  stateDir: string;
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
+  claudePort: ClaudePort;
+}): Promise<number> {
+  let profiles;
+  try {
+    profiles = (await loadRegistry(deps.stateDir)).profiles;
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  const lines = Object.entries(profiles)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([alias, record]) => {
+      const identity = record.expectedIdentity ? formatAccountAndOrg(record.expectedIdentity) : NEVER_LOGGED_IN;
+      return `${alias}: ${identity}`;
+    });
+
+  let defaultStatus: AuthStatus;
+  try {
+    defaultStatus = await deps.claudePort.authStatus();
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  const defaultIdentity = !defaultStatus.loggedIn
+    ? NOT_LOGGED_IN
+    : formatAccountAndOrg({ email: defaultStatus.email ?? UNKNOWN, orgName: defaultStatus.orgName ?? UNKNOWN });
+  lines.push(`${DEFAULT_INSTALL_ALIAS}: ${defaultIdentity} [unmanaged]`);
+
+  deps.stdout(lines.join("\n"));
+  return 0;
+}
+
+/** Renders an (Account, Organization) pair the way both a recorded Expected identity and a live
+ * {@link AuthStatus} are shown in `ccp ls` — the one shape both call sites share. */
+function formatAccountAndOrg(identity: { email: string; orgName: string }): string {
+  return `${identity.email} (${identity.orgName})`;
 }

@@ -1,10 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
-import { expectedIdentityFor } from "../src/registry.js";
+import { loadRegistry } from "../src/registry.js";
 
 /** Captures every line written to stdout/stderr, in order, for assertion. */
 function captureLines(): { stdout: string[]; stderr: string[]; stdoutFn: (line: string) => void; stderrFn: (line: string) => void } {
@@ -169,6 +169,121 @@ describe("runCli whoami", () => {
   });
 });
 
+describe("runCli add", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-add-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("creates a Profile and registers its Alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["add", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/work/);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toBeDefined();
+    expect(registry.profiles.work?.expectedIdentity).toBeNull();
+  });
+
+  it("rejects a duplicate Alias with an actionable message on stderr and changes nothing", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    const registryBefore = await loadRegistry(stateDir);
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["add", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/work/i);
+
+    const registryAfter = await loadRegistry(stateDir);
+    expect(registryAfter).toEqual(registryBefore);
+  });
+
+  it("requires an alias argument", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["add"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/alias/i);
+  });
+
+  it("rejects '(default)' as an Alias since it's reserved for the Default install", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["add", "(default)"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/reserved/i);
+  });
+});
+
+describe("runCli ls", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-ls-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("lists a never-logged-in Profile alongside the Default install, marked unmanaged", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    const report = stdout.join("\n");
+    expect(report).toMatch(/\bwork\b/);
+    expect(report).toMatch(/never logged in/i);
+    expect(report).toMatch(/\(default\)/);
+    expect(report).toMatch(/dev@example\.com/);
+    expect(report).toMatch(/unmanaged/i);
+    // The Default install row is asked about via the ambient environment, no directory override.
+    expect(claudePort.calls).toEqual([undefined]);
+  });
+
+  it("lists the Default install even when no Profile has been added yet", async () => {
+    const claudePort = fakeClaudePort({ loggedIn: false });
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/\(default\)/);
+  });
+
+  it("produces an actionable error, not a crash, when the registry file is malformed", async () => {
+    await writeFile(join(stateDir, "registry.json"), "not json", "utf8");
+    const claudePort = fakeClaudePort({ loggedIn: false });
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/registry/i);
+  });
+});
+
 describe("runCli login", () => {
   let stateDir: string;
 
@@ -200,8 +315,47 @@ describe("runCli login", () => {
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
-    expect(stderr.join("\n")).toMatch(/not a valid Profile alias/i);
+    expect(stderr.join("\n")).toMatch(/alias/i);
     expect(claudePort.loginCalls).toEqual([]);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry).toEqual({ profiles: {} });
+  });
+
+  it("auto-provisions a Profile that was never `ccp add`ed, under the same config directory `ccp add` would use", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    const expectedConfigDir = join(stateDir, "profiles", "work");
+    expect(claudePort.loginCalls).toEqual([expectedConfigDir]);
+    expect(claudePort.calls).toEqual([expectedConfigDir]);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toEqual({
+      configDir: expectedConfigDir,
+      expectedIdentity: { email: "work@example.com", orgName: "Work Org" },
+    });
+  });
+
+  it("reuses the config directory `ccp add` already created, rather than provisioning a second one", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const code = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort, stateDir });
+
+    expect(code).toBe(0);
+    expect(claudePort.loginCalls).toEqual([configDir]);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toEqual({
+      configDir,
+      expectedIdentity: { email: "work@example.com", orgName: "Work Org" },
+    });
   });
 
   it("fails without recording anything when claude reports logged-in but omits email/orgName", async () => {
@@ -215,7 +369,8 @@ describe("runCli login", () => {
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/did not report/i);
-    await expect(expectedIdentityFor(stateDir, "work")).resolves.toBeNull();
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toBeNull();
   });
 
   it("logs a Profile in, scoped to its own config directory, and records the resulting identity", async () => {
@@ -226,13 +381,15 @@ describe("runCli login", () => {
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
-    expect(claudePort.loginCalls).toEqual([join(stateDir, "work")]);
-    expect(claudePort.calls).toEqual([join(stateDir, "work")]);
+    const expectedConfigDir = join(stateDir, "profiles", "work");
+    expect(claudePort.loginCalls).toEqual([expectedConfigDir]);
+    expect(claudePort.calls).toEqual([expectedConfigDir]);
     const report = stdout.join("\n");
     expect(report).toMatch(/work@example\.com/);
     expect(report).toMatch(/Work Org/);
 
-    await expect(expectedIdentityFor(stateDir, "work")).resolves.toEqual({
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toEqual({
       email: "work@example.com",
       orgName: "Work Org",
     });
@@ -247,7 +404,8 @@ describe("runCli login", () => {
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/closed the browser/);
-    await expect(expectedIdentityFor(stateDir, "work")).resolves.toBeNull();
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toBeNull();
   });
 
   it("fails without recording anything when the Profile is still not logged in afterwards", async () => {
@@ -258,7 +416,8 @@ describe("runCli login", () => {
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
-    await expect(expectedIdentityFor(stateDir, "work")).resolves.toBeNull();
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toBeNull();
   });
 
   it("logging in one Profile leaves every other Profile's recorded identity intact", async () => {
@@ -279,11 +438,12 @@ describe("runCli login", () => {
     });
     expect(codePersonal).toBe(0);
 
-    await expect(expectedIdentityFor(stateDir, "work")).resolves.toEqual({
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toEqual({
       email: "work@example.com",
       orgName: "Work Org",
     });
-    await expect(expectedIdentityFor(stateDir, "personal")).resolves.toEqual({
+    expect(registry.profiles.personal?.expectedIdentity).toEqual({
       email: "me@example.com",
       orgName: "Personal Org",
     });

@@ -68,3 +68,35 @@ Alias before any command derives a directory from it.
 - Issue #3's `ccp add`/`ccp ls` will read and extend this same file. Aliases created by `ccp add`
   before ever logging in should be expected to round-trip through `readRegistry` with
   `expectedIdentity: null` — this decision's shape already accommodates that.
+
+## Superseded, in part, by issue #3 landing for real
+
+Everything above was written, as its own text says, because "issue #3 (which was expected to
+introduce the registry) hasn't landed on this branch yet." It has now landed (`c70b22e`), and its
+real registry disagrees with two things this decision assumed rather than merely extends them:
+
+- **`configDir` *is* stored in the registry**, one field per `ProfileRecord` alongside
+  `expectedIdentity` — the option this ADR considered and rejected. `addProfile` is the only
+  writer of that field, so the "drift apart" risk this ADR was avoiding doesn't arise: nothing
+  else ever assigns a Profile a `configDir`.
+- **A Profile's config directory is `<state dir>/profiles/<alias>`**, not `<state dir>/<alias>`.
+  The bare `<state dir>` root is reserved for the registry file itself (`registry.json`) and
+  whatever else the tool's state directory needs to hold alongside managed Profiles.
+
+`configDirFor` as specified above was never built against the real shape and doesn't exist;
+`recordExpectedIdentity` does exist, but reads a Profile's `configDir` out of its existing registry
+entry rather than computing one. Concretely, `ccp login <alias>`:
+
+1. Loads the registry and looks up `alias`.
+2. If found, reuses its recorded `configDir` unchanged (`ccp add` already created it).
+3. If not found, calls `addProfile` to provision it on the spot — preserving this ADR's original
+   intent that `ccp login` works standalone, without requiring `ccp add` first — which also means
+   Alias validation and the `(default)` reservation are enforced by `addProfile`, not by a
+   `configDirFor` of this decision's own.
+4. Runs the login flow scoped to that `configDir`, then calls `recordExpectedIdentity`, which
+   requires the alias to already have a registry entry (true by construction after steps 2–3) and
+   updates only its `expectedIdentity`, leaving `configDir` and every other alias untouched.
+
+The rest of this decision — the registry living at `<state dir>/registry.json`, a missing file
+reading as empty, a malformed one failing loudly, and one alias's `recordExpectedIdentity` never
+disturbing another's — holds exactly as written.

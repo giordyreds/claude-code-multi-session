@@ -1,10 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { configDirFor, expectedIdentityFor, readRegistry, recordExpectedIdentity } from "../src/registry.js";
+import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity, saveRegistry } from "../src/registry.js";
 
-describe("registry", () => {
+describe("loadRegistry", () => {
   let stateDir: string;
 
   beforeEach(async () => {
@@ -15,80 +16,192 @@ describe("registry", () => {
     await rm(stateDir, { recursive: true, force: true });
   });
 
-  it("reads an empty registry when no file exists yet", async () => {
-    await expect(readRegistry(stateDir)).resolves.toEqual({ profiles: {} });
+  it("returns an empty registry when the registry file doesn't exist yet", async () => {
+    await expect(loadRegistry(stateDir)).resolves.toEqual({ profiles: {} });
   });
 
-  it("returns null for an alias with no recorded expected identity", async () => {
-    await expect(expectedIdentityFor(stateDir, "work")).resolves.toBeNull();
+  it("round-trips a saved registry", async () => {
+    const registry = {
+      profiles: {
+        work: { configDir: join(stateDir, "profiles", "work"), expectedIdentity: null },
+        personal: {
+          configDir: join(stateDir, "profiles", "personal"),
+          expectedIdentity: { email: "dev@example.com", orgName: "Acme Corp" },
+        },
+      },
+    };
+
+    await saveRegistry(stateDir, registry);
+
+    await expect(loadRegistry(stateDir)).resolves.toEqual(registry);
   });
 
-  it("records and reads back an alias's expected identity", async () => {
+  it("throws an actionable error rather than resetting when the registry file isn't valid JSON", async () => {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, "registry.json"), "not json", "utf8");
+
+    await expect(loadRegistry(stateDir)).rejects.toThrow(/registry/i);
+  });
+
+  it("throws an actionable error rather than resetting when 'profiles' is missing", async () => {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, "registry.json"), JSON.stringify({}), "utf8");
+
+    await expect(loadRegistry(stateDir)).rejects.toThrow(/registry/i);
+  });
+
+  it("throws an actionable error rather than resetting when 'profiles' is the wrong shape", async () => {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, "registry.json"), JSON.stringify({ profiles: [] }), "utf8");
+
+    await expect(loadRegistry(stateDir)).rejects.toThrow(/registry/i);
+  });
+
+  it("throws an actionable error when a profile entry is missing configDir", async () => {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, "registry.json"),
+      JSON.stringify({ profiles: { work: { expectedIdentity: null } } }),
+      "utf8",
+    );
+
+    await expect(loadRegistry(stateDir)).rejects.toThrow(/work/);
+  });
+
+  it("throws an actionable error when a profile entry has a malformed expectedIdentity", async () => {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, "registry.json"),
+      JSON.stringify({ profiles: { work: { configDir: "/x", expectedIdentity: { email: "only-email" } } } }),
+      "utf8",
+    );
+
+    await expect(loadRegistry(stateDir)).rejects.toThrow(/work/);
+  });
+});
+
+describe("addProfile", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-registry-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("creates an isolated config directory under the state directory and registers the Alias", async () => {
+    const result = await addProfile(stateDir, "work");
+
+    expect(result.alias).toBe("work");
+    expect(result.configDir.startsWith(stateDir)).toBe(true);
+
+    const dirStat = await stat(result.configDir);
+    expect(dirStat.isDirectory()).toBe(true);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toEqual({ configDir: result.configDir, expectedIdentity: null });
+  });
+
+  it("gives two Profiles distinct config directories", async () => {
+    const work = await addProfile(stateDir, "work");
+    const personal = await addProfile(stateDir, "personal");
+
+    expect(work.configDir).not.toBe(personal.configDir);
+  });
+
+  it("rejects a duplicate Alias with an actionable message and changes nothing", async () => {
+    const first = await addProfile(stateDir, "work");
+    const registryBefore = await loadRegistry(stateDir);
+
+    await expect(addProfile(stateDir, "work")).rejects.toThrow(/work/);
+
+    const registryAfter = await loadRegistry(stateDir);
+    expect(registryAfter).toEqual(registryBefore);
+    expect(registryAfter.profiles.work?.configDir).toBe(first.configDir);
+    expect(Object.keys(registryAfter.profiles)).toEqual(["work"]);
+  });
+
+  it("rejects an empty Alias", async () => {
+    await expect(addProfile(stateDir, "")).rejects.toThrow(/alias/i);
+  });
+
+  it("rejects an Alias containing a path separator, rather than escaping the state directory", async () => {
+    await expect(addProfile(stateDir, "../../etc")).rejects.toThrow(/alias/i);
+    await expect(addProfile(stateDir, "sub/dir")).rejects.toThrow(/alias/i);
+
+    await expect(loadRegistry(stateDir)).resolves.toEqual({ profiles: {} });
+  });
+
+  it("rejects '.' and '..' as an Alias even without a path separator", async () => {
+    await expect(addProfile(stateDir, ".")).rejects.toThrow(/alias/i);
+    await expect(addProfile(stateDir, "..")).rejects.toThrow(/alias/i);
+  });
+
+  it("rejects '(default)' as an Alias since it's reserved for the Default install", async () => {
+    await expect(addProfile(stateDir, DEFAULT_INSTALL_ALIAS)).rejects.toThrow(/reserved/i);
+  });
+
+  it("doesn't mistake an Object.prototype property name for an existing duplicate Alias", async () => {
+    const result = await addProfile(stateDir, "constructor");
+
+    expect(result.alias).toBe("constructor");
+    const registry = await loadRegistry(stateDir);
+    expect(Object.keys(registry.profiles)).toEqual(["constructor"]);
+  });
+});
+
+describe("recordExpectedIdentity", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-registry-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("records an alias's expected identity without disturbing its configDir", async () => {
+    const { configDir } = await addProfile(stateDir, "work");
+
     await recordExpectedIdentity(stateDir, "work", { email: "dev@example.com", orgName: "Acme Corp" });
 
-    await expect(expectedIdentityFor(stateDir, "work")).resolves.toEqual({
-      email: "dev@example.com",
-      orgName: "Acme Corp",
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toEqual({
+      configDir,
+      expectedIdentity: { email: "dev@example.com", orgName: "Acme Corp" },
     });
-  });
-
-  it("creates the state directory if it doesn't exist yet", async () => {
-    const nested = join(stateDir, "nested", "dir");
-
-    await recordExpectedIdentity(nested, "work", { email: "dev@example.com", orgName: "Acme Corp" });
-
-    await expect(readFile(join(nested, "registry.json"), "utf8")).resolves.toContain("dev@example.com");
   });
 
   it("leaves every other alias's recorded identity intact when one alias is (re-)recorded", async () => {
     // Exercises the real registry file end-to-end (mkdtemp + real fs, no fake), because this is
     // the isolation guarantee `ccp login`'s acceptance criteria call out by name: logging in one
     // Profile must never disturb another Profile's already-recorded identity.
+    await addProfile(stateDir, "work");
+    await addProfile(stateDir, "personal");
+
     await recordExpectedIdentity(stateDir, "work", { email: "work@example.com", orgName: "Work Org" });
     await recordExpectedIdentity(stateDir, "personal", { email: "me@example.com", orgName: "Personal Org" });
-
     await recordExpectedIdentity(stateDir, "work", { email: "work2@example.com", orgName: "Work Org 2" });
 
-    await expect(expectedIdentityFor(stateDir, "personal")).resolves.toEqual({
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.personal?.expectedIdentity).toEqual({
       email: "me@example.com",
       orgName: "Personal Org",
     });
-    await expect(expectedIdentityFor(stateDir, "work")).resolves.toEqual({
+    expect(registry.profiles.work?.expectedIdentity).toEqual({
       email: "work2@example.com",
       orgName: "Work Org 2",
     });
   });
 
-  it("throws an actionable error when the registry file is malformed JSON", async () => {
-    await writeFile(join(stateDir, "registry.json"), "not json", "utf8");
+  it("throws an actionable error rather than fabricating an entry for an alias that was never added", async () => {
+    await expect(
+      recordExpectedIdentity(stateDir, "ghost", { email: "dev@example.com", orgName: "Acme Corp" }),
+    ).rejects.toThrow(/ghost/);
 
-    await expect(readRegistry(stateDir)).rejects.toThrow(/not valid JSON/i);
-  });
-
-  it("throws an actionable error when the registry file is well-formed JSON but missing 'profiles'", async () => {
-    await writeFile(join(stateDir, "registry.json"), JSON.stringify({ unexpected: true }), "utf8");
-
-    await expect(readRegistry(stateDir)).rejects.toThrow(/malformed/i);
-  });
-});
-
-describe("configDirFor", () => {
-  it("joins the state directory and the alias", () => {
-    expect(configDirFor("/state", "work")).toBe(join("/state", "work"));
-  });
-
-  it("rejects an empty alias", () => {
-    expect(() => configDirFor("/state", "")).toThrow(/not a valid Profile alias/i);
-  });
-
-  it("rejects an alias containing a path separator, which would escape the state directory", () => {
-    expect(() => configDirFor("/state", "../etc")).toThrow(/not a valid Profile alias/i);
-    expect(() => configDirFor("/state", "work/../../etc")).toThrow(/not a valid Profile alias/i);
-    expect(() => configDirFor("/state", "sub/dir")).toThrow(/not a valid Profile alias/i);
-  });
-
-  it("rejects a bare '.' or '..' alias", () => {
-    expect(() => configDirFor("/state", ".")).toThrow(/not a valid Profile alias/i);
-    expect(() => configDirFor("/state", "..")).toThrow(/not a valid Profile alias/i);
+    await expect(loadRegistry(stateDir)).resolves.toEqual({ profiles: {} });
   });
 });
