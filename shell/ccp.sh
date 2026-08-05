@@ -2,6 +2,7 @@
 #
 #   source /path/to/shell/ccp.sh
 #   ccp use work
+#   ccp use          # no Alias: shows an interactive picker on stderr (ticket #9)
 #
 # Per ADR-0004, a child process cannot modify its parent shell's environment, so Binding can
 # only happen by this function `eval`-ing output the `ccp` program prints to stdout. `command
