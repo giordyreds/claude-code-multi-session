@@ -2,6 +2,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isErrnoException } from "./fs-utils.js";
 import { shareRig } from "./rig.js";
+import { renderSettings } from "./settings.js";
+
+/** The settings file's name, both in the Default install and in every rendered Profile — the one
+ * name Claude Code itself reads (ADR-0002). */
+const SETTINGS_FILE_NAME = "settings.json";
 
 /** The (Account, Organization) a Profile is recorded as resolving to — see CONTEXT.md's
  * **Expected identity**. `null` until something (`ccp login`, or a future Reconciliation command)
@@ -78,9 +83,11 @@ export async function saveRegistry(stateDir: string, registry: Registry): Promis
 
 /**
  * Creates a Profile named `alias`: an isolated configuration directory under `stateDir` with the
- * Rig shared into it from `installDir` (ADR-0007), registered in the registry with no
- * {@link ExpectedIdentity} yet. Checks for a duplicate Alias before touching the filesystem or
- * the registry, so a rejected `add` changes nothing.
+ * Rig shared into it from `installDir` (ADR-0007) and its settings rendered from the Default
+ * install's base (ADR-0002) — including the status-line Alias indicator ticket #10 requires a
+ * running Session to show — registered in the registry with no {@link ExpectedIdentity} yet.
+ * Checks for a duplicate Alias before touching the filesystem or the registry, so a rejected
+ * `add` changes nothing.
  */
 export async function addProfile(
   stateDir: string,
@@ -104,6 +111,10 @@ export async function addProfile(
   const configDir = join(stateDir, "profiles", alias);
   await mkdir(configDir, { recursive: true });
   await shareRig(installDir, configDir);
+  await renderSettings({
+    baseSettingsPath: join(installDir, SETTINGS_FILE_NAME),
+    outputSettingsPath: join(configDir, SETTINGS_FILE_NAME),
+  });
 
   registry.profiles[alias] = { configDir, expectedIdentity: null, drifted: false };
   await saveRegistry(stateDir, registry);
