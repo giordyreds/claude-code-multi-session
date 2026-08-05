@@ -1,9 +1,10 @@
-import { mkdtemp, readlink, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
+import type { CommandRunner } from "../src/command-runner.js";
 import type { Picker, PickerRow } from "../src/picker.js";
 import { addProfile, loadRegistry, recordExpectedIdentity } from "../src/registry.js";
 
@@ -63,6 +64,19 @@ function fakePicker(select: (rows: PickerRow[]) => string | undefined): Picker &
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A fake {@link CommandRunner}: records every command it was asked to run and resolves the given
+ * exit code without ever spawning a real process. */
+function fakeCommandRunner(
+  exitCode: number | null,
+): CommandRunner & { calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> } {
+  const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+  const runner = async (command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => {
+    calls.push({ command, args, env: options.env });
+    return { exitCode };
+  };
+  return Object.assign(runner, { calls });
 }
 
 describe("runCli", () => {
@@ -980,5 +994,148 @@ describe("runCli use (interactive picker, no Alias given)", () => {
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/interactive terminal/i);
+  });
+});
+
+describe("runCli run", () => {
+  let stateDir: string;
+  let installDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-run-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-run-install-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
+  });
+
+  it("requires an alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const commandRunner = fakeCommandRunner(0);
+
+    const code = await runCli(["run"], { stateDir, stdout: stdoutFn, stderr: stderrFn, commandRunner });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+    expect(commandRunner.calls).toEqual([]);
+  });
+
+  it("requires the '--' separator between the alias and the command", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const commandRunner = fakeCommandRunner(0);
+
+    const code = await runCli(["run", "work", "echo", "hi"], { stateDir, stdout: stdoutFn, stderr: stderrFn, commandRunner });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+    expect(commandRunner.calls).toEqual([]);
+  });
+
+  it("requires a command after the '--' separator", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const commandRunner = fakeCommandRunner(0);
+
+    const code = await runCli(["run", "work", "--"], { stateDir, stdout: stdoutFn, stderr: stderrFn, commandRunner });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+    expect(commandRunner.calls).toEqual([]);
+  });
+
+  it("fails for an unknown Alias before the command is ever run", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const commandRunner = fakeCommandRunner(0);
+
+    const code = await runCli(["run", "ghost", "--", "echo", "hi"], { stateDir, stdout: stdoutFn, stderr: stderrFn, commandRunner });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/unknown alias 'ghost'/i);
+    expect(commandRunner.calls).toEqual([]);
+  });
+
+  it("runs the command with CLAUDE_CONFIG_DIR set to the resolved Profile's config directory, passing args through", async () => {
+    const { configDir } = await addProfile(stateDir, "work", installDir);
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const commandRunner = fakeCommandRunner(0);
+
+    const code = await runCli(["run", "work", "--", "git", "log", "--oneline"], {
+      stateDir,
+      env: { PATH: "/usr/bin" },
+      stdout: stdoutFn,
+      stderr: stderrFn,
+      commandRunner,
+    });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([]);
+    expect(stderr).toEqual([]);
+    expect(commandRunner.calls).toHaveLength(1);
+    const call = commandRunner.calls[0]!;
+    expect(call.command).toBe("git");
+    // A '--' that belongs to the command itself (not ccp's own separator) passes through untouched.
+    expect(call.args).toEqual(["log", "--oneline"]);
+    expect(call.env.CLAUDE_CONFIG_DIR).toBe(configDir);
+    // The rest of the invoking environment reaches the child too, not just the override.
+    expect(call.env.PATH).toBe("/usr/bin");
+  });
+
+  it("passes the spawned command's exit status through untouched", async () => {
+    await addProfile(stateDir, "work", installDir);
+    const { stdoutFn, stderrFn } = captureLines();
+    const commandRunner = fakeCommandRunner(42);
+
+    const code = await runCli(["run", "work", "--", "false"], { stateDir, stdout: stdoutFn, stderr: stderrFn, commandRunner });
+
+    expect(code).toBe(42);
+  });
+
+  it("sends a hard command-runner failure (e.g. an unspawnable command) to stderr, never stdout, and exits 1", async () => {
+    await addProfile(stateDir, "work", installDir);
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const commandRunner: CommandRunner = async () => {
+      throw new Error("spawn does-not-exist ENOENT");
+    };
+
+    const code = await runCli(["run", "work", "--", "does-not-exist"], { stateDir, stdout: stdoutFn, stderr: stderrFn, commandRunner });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/ENOENT/);
+  });
+
+  it("really spawns the command: real env passthrough, real args, and a real exit code, with no `run` faking involved", async () => {
+    const { configDir } = await addProfile(stateDir, "work", installDir);
+    const outFile = join(stateDir, "out.json");
+    const script = join(stateDir, "child.mjs");
+    await writeFile(
+      script,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(outFile)}, JSON.stringify({ configDir: process.env.CLAUDE_CONFIG_DIR, args: process.argv.slice(2) }));`,
+        "process.exit(7);",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["run", "work", "--", process.execPath, script, "hello", "world"], {
+      stateDir,
+      stdout: stdoutFn,
+      stderr: stderrFn,
+    });
+
+    expect(code).toBe(7);
+    expect(stdout).toEqual([]);
+    expect(stderr).toEqual([]);
+    const result = JSON.parse(await readFile(outFile, "utf8"));
+    expect(result.configDir).toBe(configDir);
+    expect(result.args).toEqual(["hello", "world"]);
   });
 });

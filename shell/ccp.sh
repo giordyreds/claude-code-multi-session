@@ -7,6 +7,10 @@
 # Per ADR-0004, a child process cannot modify its parent shell's environment, so Binding can
 # only happen by this function `eval`-ing output the `ccp` program prints to stdout. `command
 # ccp` (not bare `ccp`) reaches the real executable instead of recursing into this function.
+#
+# `ccp run <alias> -- <command>` (ticket #11) needs none of this: it never modifies the calling
+# shell, only the command it spawns, so it works unmodified in a non-interactive shell that never
+# sourced this file at all — it falls through to the plain `command ccp "$@"` case below.
 
 ccp() {
   if [ "$1" = "use" ]; then
