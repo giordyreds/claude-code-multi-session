@@ -24,6 +24,15 @@ function defaultStateDir(env: NodeJS.ProcessEnv): string {
   return join(homedir(), ".ccacct");
 }
 
+/** The Default install's configuration directory — the source of the Rig shared into every
+ * newly added Profile (ADR-0007). Like the rest of this project's identity-resolution
+ * assumptions (ADR-0001, ADR-0005), this path is reverse-engineered rather than documented by
+ * Anthropic: it's where `claude` reads and writes when no `CLAUDE_CONFIG_DIR` override is in
+ * effect. */
+function defaultInstallDir(): string {
+  return join(homedir(), ".claude");
+}
+
 export interface RunCliOptions {
   /** The shell environment to resolve Binding from. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
@@ -38,6 +47,9 @@ export interface RunCliOptions {
   /** Test seam: the tool's own state directory, holding the Profile registry and every managed
    * Profile's isolated config directory. Defaults to `~/.ccacct`, or `$CCACCT_HOME` if set. */
   stateDir?: string;
+  /** Test seam: the Default install's configuration directory — the source of the Rig shared
+   * into every newly added Profile (ADR-0007). Defaults to `~/.claude`. */
+  installDir?: string;
 }
 
 /** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
@@ -58,8 +70,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const stdout = options.stdout ?? ((line: string) => console.log(line));
   const stderr = options.stderr ?? ((line: string) => console.error(line));
   const claudePort = options.claudePort ?? new ClaudeCliPort();
-  const stateDir = options.stateDir ?? defaultStateDir(env);
-  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir };
+  const stateDir = options.stateDir ?? defaultStateDir();
+  const installDir = options.installDir ?? defaultInstallDir();
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -70,13 +82,11 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     case "whoami":
       return runWhoami(deps);
     case "add":
-      return runAdd(argv[1], deps);
+      return runAdd({ alias: argv[1], stateDir, installDir, stdout, stderr });
     case "ls":
       return runLs(deps);
     case "login":
-      return runLogin(argv.slice(1), deps);
-    case "use":
-      return runUse(argv[1], deps);
+      return runLogin(argv.slice(1), { stateDir, installDir, stdout, stderr, claudePort });
     default:
       stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
       return 1;
@@ -122,7 +132,16 @@ function reportError(stderr: (line: string) => void, err: unknown): number {
  * alias `ccp add` already created is reused as-is, so logging in never disturbs a Profile's
  * existing (and possibly already-populated) registry entry beyond its Expected identity.
  */
-async function runLogin(args: string[], deps: CliDeps): Promise<number> {
+async function runLogin(
+  args: string[],
+  deps: {
+    stateDir: string;
+    installDir: string;
+    stdout: (line: string) => void;
+    stderr: (line: string) => void;
+    claudePort: ClaudePort;
+  },
+): Promise<number> {
   const alias = args[0];
   if (!alias) {
     deps.stderr(LOGIN_USAGE);
@@ -133,7 +152,7 @@ async function runLogin(args: string[], deps: CliDeps): Promise<number> {
   try {
     const registry = await loadRegistry(deps.stateDir);
     const existing = registry.profiles[alias];
-    configDir = existing ? existing.configDir : (await addProfile(deps.stateDir, alias)).configDir;
+    configDir = existing ? existing.configDir : (await addProfile(deps.stateDir, alias, deps.installDir)).configDir;
   } catch (err) {
     return reportError(deps.stderr, err);
   }
@@ -191,14 +210,21 @@ function formatIdentity(alias: string, status: AuthStatus): string {
  * {@link DEFAULT_INSTALL_ALIAS} sentinel — is enforced by {@link addProfile} itself, so a
  * rejection here always means the registry was left exactly as it was.
  */
-async function runAdd(alias: string | undefined, deps: CliDeps): Promise<number> {
+async function runAdd(deps: {
+  alias: string | undefined;
+  stateDir: string;
+  installDir: string;
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
+}): Promise<number> {
+  const { alias } = deps;
   if (!alias) {
     deps.stderr("Usage: ccp add <alias>");
     return 1;
   }
 
   try {
-    const result = await addProfile(deps.stateDir, alias);
+    const result = await addProfile(deps.stateDir, alias, deps.installDir);
     deps.stdout(`Created Profile '${result.alias}' at ${result.configDir}`);
     return 0;
   } catch (err) {
