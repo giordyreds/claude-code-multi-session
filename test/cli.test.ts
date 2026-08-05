@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -145,6 +145,112 @@ describe("runCli whoami", () => {
     const claudePort = throwingClaudePort("spawn claude ENOENT");
 
     const code = await runCli(["whoami"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/ENOENT/);
+  });
+});
+
+describe("runCli use", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "ccp-cli-use-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("fails without printing anything to stdout when the Alias is unknown", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+
+    const code = await runCli(["use", "ghost"], { env: { CCACCT_HOME: root }, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/unknown alias 'ghost'/i);
+    // Never verified — binding an unknown Alias must fail before ever asking `claude` about it.
+    expect(claudePort.calls).toEqual([]);
+  });
+
+  it("fails without printing anything to stdout when no Alias is given", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["use"], { env: { CCACCT_HOME: root }, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+  });
+
+  it("prints only an export statement to stdout for a known, logged-in Profile", async () => {
+    await mkdir(join(root, "work"));
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+    const code = await runCli(["use", "work"], { env: { CCACCT_HOME: root }, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${join(root, "work")}'`]);
+    // Verified against the Profile's own directory, not whatever's ambient.
+    expect(claudePort.calls).toEqual([join(root, "work")]);
+  });
+
+  it("still binds, but warns on stderr, when the Profile is logged out", async () => {
+    await mkdir(join(root, "work"));
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["use", "work"], { env: { CCACCT_HOME: root }, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${join(root, "work")}'`]);
+    expect(stderr.join("\n")).toMatch(/'work'.*not logged in/i);
+  });
+
+  it("still binds, but warns on stderr, when the observed identity has drifted from the recorded Expected identity", async () => {
+    await mkdir(join(root, "work"));
+    await mkdir(join(root, "work", ".ccp"));
+    await writeFile(
+      join(root, "work", ".ccp", "expected-identity.json"),
+      JSON.stringify({ email: "old@example.com", orgName: "Old Org" }),
+    );
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "new@example.com", orgName: "New Org" });
+
+    const code = await runCli(["use", "work"], { env: { CCACCT_HOME: root }, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${join(root, "work")}'`]);
+    expect(stderr.join("\n")).toMatch(/drift/i);
+  });
+
+  it("does not warn when the observed identity matches the recorded Expected identity", async () => {
+    await mkdir(join(root, "work"));
+    await mkdir(join(root, "work", ".ccp"));
+    await writeFile(
+      join(root, "work", ".ccp", "expected-identity.json"),
+      JSON.stringify({ email: "work@example.com", orgName: "Work Org" }),
+    );
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+    const code = await runCli(["use", "work"], { env: { CCACCT_HOME: root }, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+  });
+
+  it("fails without printing anything to stdout when the ClaudePort throws", async () => {
+    await mkdir(join(root, "work"));
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = throwingClaudePort("spawn claude ENOENT");
+
+    const code = await runCli(["use", "work"], { env: { CCACCT_HOME: root }, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
