@@ -481,6 +481,12 @@ function formatAccountAndOrg(identity: { email: string; orgName: string }): stri
  * error that would stop the rest of the run. Both repair steps report whether they actually
  * changed anything, so running `sync` again immediately, with nothing left to fix, reports no
  * changes for every Profile the second time.
+ *
+ * "What was skipped" (this ticket's own words) means a whole Profile `sync` couldn't act on, not
+ * an individual Rig item absent from the Default install: {@link repairRig} already treats that
+ * as ordinary, silent-by-design state (Spike 0001's `agents`/`commands` finding, same as
+ * {@link shareRig} before it), and naming it in every Profile's line on every run would turn
+ * permanently-normal state into noise that drowns out the one line that actually needs attention.
  */
 async function runSync(deps: {
   stateDir: string;
@@ -502,7 +508,7 @@ async function runSync(deps: {
   }
 
   let anySkipped = false;
-  const lines = [];
+  const lines: string[] = [];
   for (const alias of aliases) {
     const result = await syncProfile(alias, profiles[alias]!, deps.installDir);
     lines.push(result.line);
@@ -513,17 +519,23 @@ async function runSync(deps: {
   return anySkipped ? 1 : 0;
 }
 
+/** One Profile's outcome from a single `ccp sync` pass. */
+interface ProfileSyncResult {
+  /** The report line `runSync` prints for this Profile — either what changed, `no changes`, or a
+   * `SKIPPED` line naming why. */
+  line: string;
+  /** Whether this Profile's own problem (most commonly {@link renderSettings}'s hand-edit
+   * refusal) kept it from syncing — drives `runSync`'s non-zero exit code. */
+  skipped: boolean;
+}
+
 /**
  * Syncs one Profile: repairs its Rig sharing, then re-renders its settings. Never throws — either
  * step's failure (most commonly {@link renderSettings}'s hand-edit refusal) is caught and turned
  * into that Profile's own `SKIPPED` line, so one Profile's problem can never take the rest of
  * `ccp sync`'s run down with it.
  */
-async function syncProfile(
-  alias: string,
-  record: ProfileRecord,
-  installDir: string,
-): Promise<{ line: string; skipped: boolean }> {
+async function syncProfile(alias: string, record: ProfileRecord, installDir: string): Promise<ProfileSyncResult> {
   const changes: string[] = [];
 
   try {
