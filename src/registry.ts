@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isErrnoException } from "./fs-utils.js";
 import { shareRig } from "./rig.js";
@@ -162,6 +162,36 @@ export async function recordDrift(stateDir: string, alias: string, drifted: bool
 
   registry.profiles[alias] = { ...record, drifted };
   await saveRegistry(stateDir, registry);
+}
+
+/**
+ * Removes Profile `alias`: deletes its config directory and its registry entry. `configDir`
+ * holds the Rig only as symlinks (ADR-0007), and deleting a directory never follows the symlinks
+ * it contains into their targets, so this can never reach into the Default install and delete the
+ * Rig content it shares — only the Profile's own links to it. The Default install itself can
+ * never be named here since it is never a registered Alias; rejected explicitly anyway, so the
+ * failure is "the Default install can't be removed" rather than a confusing "unknown Alias".
+ *
+ * Resolves the removed {@link ProfileRecord} so callers (`ccp rm`) have its `configDir` on hand
+ * for best-effort daemon cleanup without a second registry read.
+ */
+export async function removeProfile(stateDir: string, alias: string): Promise<ProfileRecord> {
+  if (alias === DEFAULT_INSTALL_ALIAS) {
+    throw new Error(`'${DEFAULT_INSTALL_ALIAS}' is the Default install and can never be removed.`);
+  }
+
+  const registry = await loadRegistry(stateDir);
+  const record = registry.profiles[alias];
+  if (!record) {
+    throw new Error(`No Profile named '${alias}' is registered. Run 'ccp ls' to see every registered Alias.`);
+  }
+
+  await rm(record.configDir, { recursive: true, force: true });
+
+  delete registry.profiles[alias];
+  await saveRegistry(stateDir, registry);
+
+  return record;
 }
 
 /**

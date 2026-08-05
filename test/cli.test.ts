@@ -1,12 +1,13 @@
-import { mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
 import type { CommandRunner } from "../src/command-runner.js";
+import type { DaemonPort } from "../src/daemon.js";
 import type { Picker, PickerRow } from "../src/picker.js";
-import { addProfile, loadRegistry, recordExpectedIdentity } from "../src/registry.js";
+import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity } from "../src/registry.js";
 
 /** Captures every line written to stdout/stderr, in order, for assertion. */
 function captureLines(): { stdout: string[]; stderr: string[]; stdoutFn: (line: string) => void; stderrFn: (line: string) => void } {
@@ -45,6 +46,19 @@ function throwingClaudePort(message: string): ClaudePort {
     async login() {},
     async authStatus() {
       throw new Error(message);
+    },
+  };
+}
+
+/** A fake DaemonPort that records every `configDir` it was asked to stop, and optionally rejects
+ * (to exercise `ccp rm`'s "best-effort — never fails removal" acceptance criterion). */
+function fakeDaemonPort(options?: { error?: string }): DaemonPort & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    async stopDaemon(configDir: string) {
+      calls.push(configDir);
+      if (options?.error) throw new Error(options.error);
     },
   };
 }
@@ -1285,5 +1299,151 @@ describe("runCli run", () => {
     const result = JSON.parse(await readFile(outFile, "utf8"));
     expect(result.configDir).toBe(configDir);
     expect(result.args).toEqual(["hello", "world"]);
+  });
+});
+
+describe("runCli rm", () => {
+  let stateDir: string;
+  let installDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-rm-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-rm-install-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
+  });
+
+  it("requires an alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["rm"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+  });
+
+  it("refuses to remove the Default install", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["rm", DEFAULT_INSTALL_ALIAS, "--yes"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/default/i);
+  });
+
+  it("fails for an unknown Alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["rm", "ghost", "--yes"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/ghost/i);
+  });
+
+  it("requires explicit confirmation stating history will be lost, and changes nothing without it", async () => {
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["rm", "work"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/history/i);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toBeDefined();
+    await expect(stat(configDir)).resolves.toBeDefined();
+  });
+
+  it("removes the Profile, its configuration and its isolated history once confirmed", async () => {
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+    const daemonPort = fakeDaemonPort();
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["rm", "work", "--yes"], {
+      stateDir,
+      installDir,
+      stdout: stdoutFn,
+      stderr: stderrFn,
+      env: {},
+      daemonPort,
+    });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/work/);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toBeUndefined();
+    await expect(stat(configDir)).rejects.toThrow();
+    expect(daemonPort.calls).toEqual([configDir]);
+  });
+
+  it("cleans up the daemon on a best-effort basis: a daemon failure warns but never fails the removal", async () => {
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    const daemonPort = fakeDaemonPort({ error: "no permission to signal pid 123" });
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["rm", "work", "--yes"], {
+      stateDir,
+      installDir,
+      stdout: stdoutFn,
+      stderr: stderrFn,
+      env: {},
+      daemonPort,
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.join("\n")).toMatch(/daemon/i);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toBeUndefined();
+  });
+
+  it("warns clearly, but does not block, when the current shell is bound to the Profile being removed", async () => {
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["rm", "work", "--yes"], {
+      stateDir,
+      installDir,
+      stdout: stdoutFn,
+      stderr: stderrFn,
+      env: { CLAUDE_CONFIG_DIR: configDir },
+      daemonPort: fakeDaemonPort(),
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.join("\n")).toMatch(/bound/i);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toBeUndefined();
+  });
+
+  it("leaves every other Profile untouched", async () => {
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "personal"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
+    const { configDir: personalConfigDir } = (await loadRegistry(stateDir)).profiles.personal!;
+
+    const code = await runCli(["rm", "work", "--yes"], {
+      stateDir,
+      installDir,
+      stdout: () => {},
+      stderr: () => {},
+      env: {},
+      daemonPort: fakeDaemonPort(),
+    });
+
+    expect(code).toBe(0);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.personal).toBeDefined();
+    await expect(stat(personalConfigDir)).resolves.toBeDefined();
   });
 });
