@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -189,19 +189,22 @@ describe("runCli whoami", () => {
 
 describe("runCli add", () => {
   let stateDir: string;
+  let installDir: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-add-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-add-install-"));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
   });
 
   it("creates a Profile and registers its Alias", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
 
-    const code = await runCli(["add", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+    const code = await runCli(["add", "work"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
@@ -212,12 +215,26 @@ describe("runCli add", () => {
     expect(registry.profiles.work?.expectedIdentity).toBeNull();
   });
 
+  it("shares the Rig from the Default install into the new Profile, without duplicating it", async () => {
+    await writeFile(join(installDir, "CLAUDE.md"), "# Instructions", "utf8");
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["add", "work"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+
+    const registry = await loadRegistry(stateDir);
+    const configDir = registry.profiles.work!.configDir;
+    expect(await readlink(join(configDir, "CLAUDE.md"))).toBe(join(installDir, "CLAUDE.md"));
+  });
+
   it("rejects a duplicate Alias with an actionable message on stderr and changes nothing", async () => {
-    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
     const registryBefore = await loadRegistry(stateDir);
 
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const code = await runCli(["add", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+    const code = await runCli(["add", "work"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -230,7 +247,7 @@ describe("runCli add", () => {
   it("requires an alias argument", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
 
-    const code = await runCli(["add"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+    const code = await runCli(["add"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -240,7 +257,7 @@ describe("runCli add", () => {
   it("rejects '(default)' as an Alias since it's reserved for the Default install", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
 
-    const code = await runCli(["add", "(default)"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+    const code = await runCli(["add", "(default)"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -250,17 +267,20 @@ describe("runCli add", () => {
 
 describe("runCli ls", () => {
   let stateDir: string;
+  let installDir: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-ls-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-ls-install-"));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
   });
 
   it("lists a never-logged-in Profile alongside the Default install, marked unmanaged", async () => {
-    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
     const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
 
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
@@ -304,20 +324,23 @@ describe("runCli ls", () => {
 
 describe("runCli login", () => {
   let stateDir: string;
+  let installDir: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-login-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-login-install-"));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
   });
 
   it("requires an alias", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false });
 
-    const code = await runCli(["login"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -329,7 +352,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false });
 
-    const code = await runCli(["login", "../etc"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "../etc"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -344,7 +367,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
@@ -356,15 +379,16 @@ describe("runCli login", () => {
     expect(registry.profiles.work).toEqual({
       configDir: expectedConfigDir,
       expectedIdentity: { email: "work@example.com", orgName: "Work Org" },
+      drifted: false,
     });
   });
 
   it("reuses the config directory `ccp add` already created, rather than provisioning a second one", async () => {
-    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
     const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
 
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
-    const code = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort, stateDir, installDir });
 
     expect(code).toBe(0);
     expect(claudePort.loginCalls).toEqual([configDir]);
@@ -373,6 +397,7 @@ describe("runCli login", () => {
     expect(registry.profiles.work).toEqual({
       configDir,
       expectedIdentity: { email: "work@example.com", orgName: "Work Org" },
+      drifted: false,
     });
   });
 
@@ -382,7 +407,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -395,7 +420,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
@@ -417,7 +442,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false }, { loginError: "user closed the browser" });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -430,7 +455,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -443,7 +468,7 @@ describe("runCli login", () => {
     // part (the actual `claude auth login` browser flow) is faked. This is the isolation
     // acceptance criterion, verified against real behaviour rather than a fake.
     const workPort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
-    const codeWork = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort: workPort, stateDir });
+    const codeWork = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort: workPort, stateDir, installDir });
     expect(codeWork).toBe(0);
 
     const personalPort = fakeClaudePort({ loggedIn: true, email: "me@example.com", orgName: "Personal Org" });
@@ -453,6 +478,7 @@ describe("runCli login", () => {
       stderr: () => {},
       claudePort: personalPort,
       stateDir,
+      installDir,
     });
     expect(codePersonal).toBe(0);
 
@@ -488,22 +514,22 @@ describe("runCli use", () => {
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/unknown alias 'ghost'/i);
-    // Never verified — binding an unknown Alias must fail before ever asking `claude` about it.
-    expect(claudePort.calls).toEqual([]);
   });
 
-  it("fails without printing anything to stdout when no Alias is given and no Profiles are registered", async () => {
-    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+  // With no Alias and no Profiles registered, `ccp use` no longer requires an Alias up front
+  // (ticket #9) — it falls through to the interactive picker, which reports this exact case
+  // itself. See "runCli use (interactive picker, no Alias given)" below.
 
-    const code = await runCli(["use"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+  it("binds a known, non-drifted Profile: only an export statement reaches stdout", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
 
-    expect(code).toBe(1);
-    expect(stdout).toEqual([]);
-    expect(stderr.join("\n")).toMatch(/no profiles are registered/i);
-  });
-
-  it("prints only an export statement to stdout for a known, logged-in Profile", async () => {
-    const { configDir } = await addProfile(stateDir, "work");
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
 
@@ -512,12 +538,15 @@ describe("runCli use", () => {
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
     expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
-    // Verified against the Profile's own directory, not whatever's ambient.
     expect(claudePort.calls).toEqual([configDir]);
+    // Never authenticates or opens a browser (CONTEXT.md's Binding, distinct from Login).
+    expect(claudePort.loginCalls).toEqual([]);
   });
 
-  it("still binds, but warns on stderr, when the Profile is logged out", async () => {
-    const { configDir } = await addProfile(stateDir, "work");
+  it("still binds a logged-out Profile, with the warning on stderr rather than stdout", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false });
 
@@ -525,48 +554,101 @@ describe("runCli use", () => {
 
     expect(code).toBe(0);
     expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
-    expect(stderr.join("\n")).toMatch(/'work'.*not logged in/i);
+    expect(stderr.join("\n")).toMatch(/not logged in/i);
   });
 
-  it("still binds, but warns on stderr, when the observed identity has drifted from the recorded Expected identity", async () => {
-    const { configDir } = await addProfile(stateDir, "work");
-    await recordExpectedIdentity(stateDir, "work", { email: "old@example.com", orgName: "Old Org" });
+  it("still binds a drifted Profile, warning prominently on stderr and naming both identities", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "new@example.com", orgName: "New Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
 
     const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
     expect(code).toBe(0);
+    // Drift is a warning, never a block — Binding still succeeds.
     expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
-    expect(stderr.join("\n")).toMatch(/drift/i);
+    const report = stderr.join("\n");
+    expect(report).toMatch(/drift/i);
+    expect(report).toMatch(/work@example\.com/);
+    expect(report).toMatch(/Work Org/);
+    expect(report).toMatch(/someone-else@example\.com/);
+    expect(report).toMatch(/Other Org/);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.drifted).toBe(true);
+    // Reconciliation is the only thing allowed to change what's recorded as expected.
+    expect(registry.profiles.work?.expectedIdentity).toEqual({ email: "work@example.com", orgName: "Work Org" });
   });
 
-  it("does not warn when the observed identity matches the recorded Expected identity", async () => {
-    await addProfile(stateDir, "work");
-    await recordExpectedIdentity(stateDir, "work", { email: "work@example.com", orgName: "Work Org" });
-    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+  it("clears a previously recorded Drift once the observed identity matches again", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, email: "drifted@example.com", orgName: "Drifted Org" }),
+    });
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
 
-    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+    const { stderr, stderrFn } = captureLines();
+    const code = await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: stderrFn,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(false);
   });
 
-  it("does not warn about Drift for a Profile that has never logged in", async () => {
-    await addProfile(stateDir, "work");
-    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "whatever@example.com", orgName: "Whatever Org" });
+  it("leaves a previously recorded Drift untouched when the Profile is logged out — nothing was observed to disprove it", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, email: "drifted@example.com", orgName: "Drifted Org" }),
+    });
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
 
-    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+    const { stderr, stderrFn } = captureLines();
+    const code = await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: stderrFn,
+      claudePort: fakeClaudePort({ loggedIn: false }),
+    });
 
     expect(code).toBe(0);
-    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${(await loadRegistry(stateDir)).profiles.work?.configDir}'`]);
-    expect(stderr).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/not logged in/i);
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
   });
 
-  it("fails without printing anything to stdout when the ClaudePort throws", async () => {
-    await addProfile(stateDir, "work");
+  it("sends a hard claude-port failure to stderr, never stdout, and exits 1", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = throwingClaudePort("spawn claude ENOENT");
 
@@ -576,35 +658,195 @@ describe("runCli use", () => {
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/ENOENT/);
   });
-
-  it("fails without printing anything to stdout when the registry file is malformed", async () => {
-    await writeFile(join(stateDir, "registry.json"), "not json", "utf8");
-    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true });
-
-    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
-
-    expect(code).toBe(1);
-    expect(stdout).toEqual([]);
-    expect(stderr.join("\n")).toMatch(/registry/i);
-    expect(claudePort.calls).toEqual([]);
-  });
 });
 
-describe("runCli use (interactive picker, no Alias given)", () => {
+describe("runCli ls (Drift marking)", () => {
   let stateDir: string;
 
   beforeEach(async () => {
-    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-use-picker-test-"));
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-ls-drift-test-"));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
   });
 
+  it("marks a drifted Profile distinctly, from stored state alone", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" }),
+    });
+
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+    // A ClaudePort that would throw if `ls` ever asked it about a managed Profile — only the
+    // Default install row may query it live.
+    const claudePort: ClaudePort = {
+      async login() {},
+      async authStatus(configDir?: string) {
+        if (configDir !== undefined) throw new Error(`ls must not live-check a managed Profile (${configDir})`);
+        return { loggedIn: false };
+      },
+    };
+
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    const report = stdout.join("\n");
+    expect(report).toMatch(/\bwork\b.*\[DRIFTED\]/i);
+  });
+
+  it("does not mark a Profile that has never drifted", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout.join("\n")).not.toMatch(/DRIFTED/i);
+  });
+});
+
+describe("runCli reconcile", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-reconcile-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("requires an alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["reconcile"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+  });
+
+  it("fails for an unknown Alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+
+    const code = await runCli(["reconcile", "ghost"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/ghost/i);
+  });
+
+  it("accepts the observed identity as the new Expected identity, without ever logging in", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" }),
+    });
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
+
+    const code = await runCli(["reconcile", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/someone-else@example\.com/);
+    // Reconciliation reads identity the same way Drift detection does — it never re-authenticates.
+    expect(claudePort.loginCalls).toEqual([]);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toEqual({
+      email: "someone-else@example.com",
+      orgName: "Other Org",
+    });
+    expect(registry.profiles.work?.drifted).toBe(false);
+  });
+
+  it("refuses to reconcile a logged-out Profile — there is no observed identity to accept as truth", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["reconcile", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/not logged in/i);
+    expect(claudePort.loginCalls).toEqual([]);
+  });
+
+  it("never disturbs another Profile's recorded identity", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["login", "personal"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "me@example.com", orgName: "Personal Org" }),
+    });
+
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
+    const code = await runCli(["reconcile", "work"], { stateDir, stdout: () => {}, stderr: () => {}, claudePort });
+
+    expect(code).toBe(0);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.personal?.expectedIdentity).toEqual({ email: "me@example.com", orgName: "Personal Org" });
+  });
+});
+
+describe("runCli use (interactive picker, no Alias given)", () => {
+  let stateDir: string;
+  let installDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-use-picker-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-use-picker-install-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
+  });
+
   it("presents every registered Profile, each row showing the Account and Organization it resolves to", async () => {
-    const { configDir: workDir } = await addProfile(stateDir, "work");
-    const { configDir: personalDir } = await addProfile(stateDir, "personal");
+    const { configDir: workDir } = await addProfile(stateDir, "work", installDir);
+    const { configDir: personalDir } = await addProfile(stateDir, "personal", installDir);
     const claudePort: ClaudePort = {
       async login() {},
       async authStatus(configDir) {
@@ -626,8 +868,8 @@ describe("runCli use (interactive picker, no Alias given)", () => {
   });
 
   it("resolves identities in parallel, not sequentially, so the picker opens promptly with several Profiles", async () => {
-    const { configDir: workDir } = await addProfile(stateDir, "work");
-    const { configDir: personalDir } = await addProfile(stateDir, "personal");
+    const { configDir: workDir } = await addProfile(stateDir, "work", installDir);
+    const { configDir: personalDir } = await addProfile(stateDir, "personal", installDir);
     const claudePort: ClaudePort = {
       async login() {},
       async authStatus(configDir) {
@@ -660,7 +902,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
   });
 
   it("prints only the resulting export to stdout once a Profile is chosen from the picker", async () => {
-    const { configDir } = await addProfile(stateDir, "work");
+    const { configDir } = await addProfile(stateDir, "work", installDir);
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
     const picker = fakePicker(() => "work");
@@ -673,7 +915,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
   });
 
   it("leaves the shell unchanged when the picker is cancelled", async () => {
-    await addProfile(stateDir, "work");
+    await addProfile(stateDir, "work", installDir);
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
     const picker = fakePicker(() => undefined);
@@ -712,7 +954,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
   });
 
   it("fails without invoking the picker when a Profile's identity can't be resolved", async () => {
-    await addProfile(stateDir, "work");
+    await addProfile(stateDir, "work", installDir);
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = throwingClaudePort("spawn claude ENOENT");
     const picker = fakePicker(() => "irrelevant");
@@ -729,7 +971,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
     // No `picker` option given — this exercises the real default TtyPicker, and vitest's own
     // process never has an interactive stdin, so this is the real non-interactive path, not a
     // simulation of it.
-    await addProfile(stateDir, "work");
+    await addProfile(stateDir, "work", installDir);
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
 
