@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
-import { loadRegistry } from "../src/registry.js";
+import { addProfile, loadRegistry, recordExpectedIdentity } from "../src/registry.js";
 
 /** Captures every line written to stdout/stderr, in order, for assertion. */
 function captureLines(): { stdout: string[]; stderr: string[]; stdoutFn: (line: string) => void; stderrFn: (line: string) => void } {
@@ -447,5 +447,128 @@ describe("runCli login", () => {
       email: "me@example.com",
       orgName: "Personal Org",
     });
+  });
+});
+
+describe("runCli use", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-use-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("fails without printing anything to stdout when the Alias is unknown", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+
+    const code = await runCli(["use", "ghost"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/unknown alias 'ghost'/i);
+    // Never verified — binding an unknown Alias must fail before ever asking `claude` about it.
+    expect(claudePort.calls).toEqual([]);
+  });
+
+  it("fails without printing anything to stdout when no Alias is given", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["use"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+  });
+
+  it("prints only an export statement to stdout for a known, logged-in Profile", async () => {
+    const { configDir } = await addProfile(stateDir, "work");
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
+    // Verified against the Profile's own directory, not whatever's ambient.
+    expect(claudePort.calls).toEqual([configDir]);
+  });
+
+  it("still binds, but warns on stderr, when the Profile is logged out", async () => {
+    const { configDir } = await addProfile(stateDir, "work");
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
+    expect(stderr.join("\n")).toMatch(/'work'.*not logged in/i);
+  });
+
+  it("still binds, but warns on stderr, when the observed identity has drifted from the recorded Expected identity", async () => {
+    const { configDir } = await addProfile(stateDir, "work");
+    await recordExpectedIdentity(stateDir, "work", { email: "old@example.com", orgName: "Old Org" });
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "new@example.com", orgName: "New Org" });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir}'`]);
+    expect(stderr.join("\n")).toMatch(/drift/i);
+  });
+
+  it("does not warn when the observed identity matches the recorded Expected identity", async () => {
+    await addProfile(stateDir, "work");
+    await recordExpectedIdentity(stateDir, "work", { email: "work@example.com", orgName: "Work Org" });
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+  });
+
+  it("does not warn about Drift for a Profile that has never logged in", async () => {
+    await addProfile(stateDir, "work");
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "whatever@example.com", orgName: "Whatever Org" });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${(await loadRegistry(stateDir)).profiles.work?.configDir}'`]);
+    expect(stderr).toEqual([]);
+  });
+
+  it("fails without printing anything to stdout when the ClaudePort throws", async () => {
+    await addProfile(stateDir, "work");
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = throwingClaudePort("spawn claude ENOENT");
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/ENOENT/);
+  });
+
+  it("fails without printing anything to stdout when the registry file is malformed", async () => {
+    await writeFile(join(stateDir, "registry.json"), "not json", "utf8");
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/registry/i);
+    expect(claudePort.calls).toEqual([]);
   });
 });
