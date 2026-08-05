@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { withProfileStatusLine } from "./status-line.js";
 
 /** A parsed settings file's shape: strict JSON, so every value is JSON-safe. */
 export type SettingsValue = Record<string, unknown>;
@@ -56,6 +57,10 @@ export interface RenderSettingsResult {
  * Writes are verified by parsing the file back before the render is treated as successful: the
  * settings file is strict JSON with no error channel for malformed content (Spike 0001), so a
  * renderer that trusts `writeFile` resolving could ship a file that silently fails to apply.
+ *
+ * The merged result also gets its `statusLine` extended with the active Profile's Alias (ticket
+ * #10) before it's treated as managed content — so hand-edit detection, the generated-marker
+ * snapshot, and the runtime-write carry-forward above all apply to it exactly like any other key.
  */
 export async function renderSettings(options: RenderSettingsOptions): Promise<RenderSettingsResult> {
   const [base, override, existing] = await Promise.all([
@@ -70,7 +75,7 @@ export async function renderSettings(options: RenderSettingsOptions): Promise<Re
     assertNoHandEdit(options.outputSettingsPath, existing);
   }
 
-  const merged = mergeSettings(base, override);
+  const merged = withProfileStatusLine(mergeSettings(base, override));
   const preserved = existing ? pickUnmanagedKeys(existing) : {};
   const marker: GeneratedMarker = { snapshot: merged };
   const rendered: SettingsValue = { ...preserved, ...merged, [GENERATED_MARKER_KEY]: marker };

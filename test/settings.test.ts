@@ -207,6 +207,29 @@ describe("renderSettings", () => {
     );
   });
 
+  it("extends the rendered statusLine with the active Profile's Alias (ticket #10)", async () => {
+    await writeFile(basePath, JSON.stringify({ model: "sonnet" }), "utf8");
+
+    const result = await renderSettings({ baseSettingsPath: basePath, outputSettingsPath: outputPath });
+
+    const statusLine = result.settings.statusLine as { type: string; command: string };
+    expect(statusLine.type).toBe("command");
+    expect(statusLine.command).toMatch(/CLAUDE_CONFIG_DIR/);
+  });
+
+  it("chains a base-configured statusLine rather than dropping it", async () => {
+    await writeFile(
+      basePath,
+      JSON.stringify({ model: "sonnet", statusLine: { type: "command", command: "~/.claude/my-statusline.sh" } }),
+      "utf8",
+    );
+
+    const result = await renderSettings({ baseSettingsPath: basePath, outputSettingsPath: outputPath });
+
+    const statusLine = result.settings.statusLine as { command: string };
+    expect(statusLine.command).toContain("~/.claude/my-statusline.sh");
+  });
+
   it("throws an actionable error naming the file when the override settings file is malformed", async () => {
     await writeFile(basePath, JSON.stringify({ model: "sonnet" }), "utf8");
     await writeFile(overridePath, "not json", "utf8");

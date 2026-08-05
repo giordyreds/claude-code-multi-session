@@ -658,6 +658,26 @@ describe("runCli use", () => {
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/ENOENT/);
   });
+
+  it("single-quotes the export line so an Alias containing shell metacharacters can't break out of it", async () => {
+    // isValidAlias (registry.ts) only rejects path traversal, not shell metacharacters, so an
+    // Alias like this one is accepted and becomes part of configDir. If the export line were ever
+    // interpolated unescaped, `ccp.sh`'s `eval` would run whatever came after the injected quote.
+    const alias = `foo"; echo pwned; echo "`;
+    await runCli(["add", alias], { stateDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles[alias]!;
+
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["use", alias], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR='${configDir.replace(/'/g, `'\\''`)}'`]);
+    // The whole value sits inside one pair of single quotes: `eval`-ing it can only ever set
+    // CLAUDE_CONFIG_DIR, never run a second, injected command.
+    expect(stdout[0]!.match(/'/g)?.length).toBe(2);
+  });
 });
 
 describe("runCli ls (Drift marking)", () => {

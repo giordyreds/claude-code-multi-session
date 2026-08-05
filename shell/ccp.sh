@@ -23,3 +23,29 @@ ccp() {
 
   command ccp "$@"
 }
+
+# Prompt indicator (ticket #10): always shows which Profile a shell is bound to, since being
+# wrong about that is the failure mode this whole tool exists to prevent. Reads
+# `CLAUDE_CONFIG_DIR` fresh on every prompt draw rather than caching an Alias at source time, so
+# the segment updates immediately after `ccp use` with no new shell needed — it just reflects
+# whatever Binding last set.
+__ccp_prompt_segment() {
+  if [ -n "$CLAUDE_CONFIG_DIR" ]; then
+    printf '[%s] ' "$(basename "$CLAUDE_CONFIG_DIR")"
+  else
+    # Mirrors registry.ts's DEFAULT_INSTALL_ALIAS: an unbound shell must never look the same as a
+    # missing indicator (ADR-0003).
+    printf '[(default)] '
+  fi
+}
+
+# Extends PS1 rather than replacing it, and only once: re-sourcing this file leaves an
+# already-extended PS1 untouched instead of stacking a second copy of the segment.
+case "$PS1" in
+  *'$(__ccp_prompt_segment)'*) ;;
+  *)
+    PS1='$(__ccp_prompt_segment)'"$PS1"
+    # Command substitution in PS1 is automatic in bash but opt-in in zsh.
+    [ -n "$ZSH_VERSION" ] && setopt PROMPT_SUBST
+    ;;
+esac

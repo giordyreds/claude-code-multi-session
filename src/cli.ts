@@ -77,6 +77,7 @@ interface CliDeps {
   stderr: (line: string) => void;
   claudePort: ClaudePort;
   stateDir: string;
+  installDir: string;
   picker: Picker;
 }
 
@@ -92,12 +93,13 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const stateDir = options.stateDir ?? defaultStateDir(env);
   const installDir = options.installDir ?? defaultInstallDir();
   const picker = options.picker ?? new TtyPicker();
-  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, picker };
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
     return 0;
   }
+
+  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir, picker };
 
   switch (argv[0]) {
     case "whoami":
@@ -270,6 +272,14 @@ async function runUse(aliasArg: string | undefined, deps: CliDeps): Promise<numb
 
   deps.stdout(`export CLAUDE_CONFIG_DIR=${shellQuote(record.configDir)}`);
   return 0;
+}
+
+/** Single-quotes `value` for safe `sh`/`zsh` evaluation — the only shape of output ADR-0004
+ * permits on stdout. `configDir` is built from an Alias (`registry.ts`'s `isValidAlias` only
+ * rejects path traversal, not shell metacharacters), so an unescaped interpolation here would let
+ * an Alias like `foo"; rm -rf ~ #` break out of the `export` line the `ccp` shell function evals. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -523,9 +533,4 @@ async function pickAlias(registry: Registry, deps: CliDeps): Promise<string | un
     reportError(deps.stderr, err);
     return undefined;
   }
-}
-
-/** Single-quotes a value for safe `sh`/`zsh` evaluation — the only shape of output ADR-0004 permits on stdout. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
