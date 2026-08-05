@@ -16,6 +16,10 @@ export interface ExpectedIdentity {
 export interface ProfileRecord {
   configDir: string;
   expectedIdentity: ExpectedIdentity | null;
+  /** Whether Binding last observed this Profile's identity diverging from its Expected identity
+   * — see CONTEXT.md's Drift. Recorded here so `ccp ls` (ticket #8) can mark drifted Profiles
+   * from stored state alone, without an API call to re-check whether a token still works. */
+  drifted: boolean;
 }
 
 /** The Profile registry — see ADR-0005's deferred registry file, created by `ccp add` and amended
@@ -101,7 +105,7 @@ export async function addProfile(
   await mkdir(configDir, { recursive: true });
   await shareRig(installDir, configDir);
 
-  registry.profiles[alias] = { configDir, expectedIdentity: null };
+  registry.profiles[alias] = { configDir, expectedIdentity: null, drifted: false };
   await saveRegistry(stateDir, registry);
 
   return { alias, configDir };
@@ -112,6 +116,10 @@ export async function addProfile(
  * in the registry untouched — the cross-Profile isolation `ccp login`'s acceptance criteria
  * require. `alias` must already be registered (by `addProfile`, directly or via `ccp login`
  * auto-provisioning it) so its `configDir` has somewhere to come from other than fabricating one.
+ *
+ * Also clears `drifted`: a freshly recorded Expected identity — whether from `ccp login` or
+ * `ccp reconcile` (ticket #8) — is by definition the new baseline, so there is nothing left to
+ * have drifted from yet.
  */
 export async function recordExpectedIdentity(
   stateDir: string,
@@ -124,7 +132,24 @@ export async function recordExpectedIdentity(
     throw new Error(`No Profile named '${alias}' is registered. Run 'ccp add ${alias}' first.`);
   }
 
-  registry.profiles[alias] = { ...record, expectedIdentity: identity };
+  registry.profiles[alias] = { ...record, expectedIdentity: identity, drifted: false };
+  await saveRegistry(stateDir, registry);
+}
+
+/**
+ * Records whether Binding last observed `alias` in Drift (CONTEXT.md), leaving its `configDir`
+ * and `expectedIdentity` untouched. The one writer of {@link ProfileRecord.drifted}, called by
+ * `ccp use` (ticket #8) each time it checks a Profile's observed identity against its Expected
+ * identity — never by `ccp ls`, which only ever reads this stored flag rather than re-deriving it.
+ */
+export async function recordDrift(stateDir: string, alias: string, drifted: boolean): Promise<void> {
+  const registry = await loadRegistry(stateDir);
+  const record = registry.profiles[alias];
+  if (!record) {
+    throw new Error(`No Profile named '${alias}' is registered. Run 'ccp add ${alias}' first.`);
+  }
+
+  registry.profiles[alias] = { ...record, drifted };
   await saveRegistry(stateDir, registry);
 }
 
@@ -177,8 +202,23 @@ function validateProfileRecord(value: unknown, alias: string, path: string): Pro
   }
 
   const expectedIdentity = validateExpectedIdentity(value.expectedIdentity, alias, path);
+  const drifted = validateDrifted(value.drifted, alias, path);
 
-  return { configDir: value.configDir, expectedIdentity };
+  return { configDir: value.configDir, expectedIdentity, drifted };
+}
+
+/** Defaults to `false` when absent, so a registry written before ticket #8 added this field still
+ * loads instead of being treated as malformed. */
+function validateDrifted(value: unknown, alias: string, path: string): boolean {
+  if (value === undefined) return false;
+
+  if (typeof value !== "boolean") {
+    throw new Error(
+      `The Profile registry at '${path}' is malformed (entry '${alias}' has an invalid 'drifted'). Fix or remove it before continuing.`,
+    );
+  }
+
+  return value;
 }
 
 function validateExpectedIdentity(value: unknown, alias: string, path: string): ExpectedIdentity | null {
