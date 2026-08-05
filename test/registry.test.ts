@@ -1,9 +1,9 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, saveRegistry } from "../src/registry.js";
+import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity, saveRegistry } from "../src/registry.js";
 
 describe("loadRegistry", () => {
   let stateDir: string;
@@ -149,5 +149,59 @@ describe("addProfile", () => {
     expect(result.alias).toBe("constructor");
     const registry = await loadRegistry(stateDir);
     expect(Object.keys(registry.profiles)).toEqual(["constructor"]);
+  });
+});
+
+describe("recordExpectedIdentity", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-registry-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("records an alias's expected identity without disturbing its configDir", async () => {
+    const { configDir } = await addProfile(stateDir, "work");
+
+    await recordExpectedIdentity(stateDir, "work", { email: "dev@example.com", orgName: "Acme Corp" });
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toEqual({
+      configDir,
+      expectedIdentity: { email: "dev@example.com", orgName: "Acme Corp" },
+    });
+  });
+
+  it("leaves every other alias's recorded identity intact when one alias is (re-)recorded", async () => {
+    // Exercises the real registry file end-to-end (mkdtemp + real fs, no fake), because this is
+    // the isolation guarantee `ccp login`'s acceptance criteria call out by name: logging in one
+    // Profile must never disturb another Profile's already-recorded identity.
+    await addProfile(stateDir, "work");
+    await addProfile(stateDir, "personal");
+
+    await recordExpectedIdentity(stateDir, "work", { email: "work@example.com", orgName: "Work Org" });
+    await recordExpectedIdentity(stateDir, "personal", { email: "me@example.com", orgName: "Personal Org" });
+    await recordExpectedIdentity(stateDir, "work", { email: "work2@example.com", orgName: "Work Org 2" });
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.personal?.expectedIdentity).toEqual({
+      email: "me@example.com",
+      orgName: "Personal Org",
+    });
+    expect(registry.profiles.work?.expectedIdentity).toEqual({
+      email: "work2@example.com",
+      orgName: "Work Org 2",
+    });
+  });
+
+  it("throws an actionable error rather than fabricating an entry for an alias that was never added", async () => {
+    await expect(
+      recordExpectedIdentity(stateDir, "ghost", { email: "dev@example.com", orgName: "Acme Corp" }),
+    ).rejects.toThrow(/ghost/);
+
+    await expect(loadRegistry(stateDir)).resolves.toEqual({ profiles: {} });
   });
 });

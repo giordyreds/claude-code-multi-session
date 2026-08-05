@@ -2,8 +2,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /** The (Account, Organization) a Profile is recorded as resolving to — see CONTEXT.md's
- * **Expected identity**. `null` until something (a future Login/Reconciliation command) records
- * one; that is the ordinary state for every Profile this ticket can create. */
+ * **Expected identity**. `null` until something (`ccp login`, or a future Reconciliation command)
+ * records one; that is the ordinary state for every freshly-added Profile. */
 export interface ExpectedIdentity {
   email: string;
   orgName: string;
@@ -16,7 +16,8 @@ export interface ProfileRecord {
   expectedIdentity: ExpectedIdentity | null;
 }
 
-/** The Profile registry — see ADR-0005's deferred registry file, now created by `ccp add`. */
+/** The Profile registry — see ADR-0005's deferred registry file, created by `ccp add` and amended
+ * (ADR-0006) to carry Expected identity for `ccp login`. */
 export interface Registry {
   profiles: Record<string, ProfileRecord>;
 }
@@ -96,6 +97,27 @@ export async function addProfile(stateDir: string, alias: string): Promise<{ ali
   await saveRegistry(stateDir, registry);
 
   return { alias, configDir };
+}
+
+/**
+ * Records `identity` as `alias`'s Expected identity (ADR-0006), leaving every other alias already
+ * in the registry untouched — the cross-Profile isolation `ccp login`'s acceptance criteria
+ * require. `alias` must already be registered (by `addProfile`, directly or via `ccp login`
+ * auto-provisioning it) so its `configDir` has somewhere to come from other than fabricating one.
+ */
+export async function recordExpectedIdentity(
+  stateDir: string,
+  alias: string,
+  identity: ExpectedIdentity,
+): Promise<void> {
+  const registry = await loadRegistry(stateDir);
+  const record = registry.profiles[alias];
+  if (!record) {
+    throw new Error(`No Profile named '${alias}' is registered. Run 'ccp add ${alias}' first.`);
+  }
+
+  registry.profiles[alias] = { ...record, expectedIdentity: identity };
+  await saveRegistry(stateDir, registry);
 }
 
 /**

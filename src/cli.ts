@@ -2,10 +2,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
-import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry } from "./registry.js";
+import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity } from "./registry.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami       Report the bound Profile's identity\n  add <alias>  Create a new Profile\n  ls           List every Profile";
+  "Usage: ccp <command>\n\nCommands:\n  whoami          Report the bound Profile's identity\n  add <alias>     Create a new Profile\n  ls              List every Profile\n  login <alias>   Authenticate a Profile and record its resulting identity";
+
+const LOGIN_USAGE = "Usage: ccp login <alias>";
 
 const NOT_LOGGED_IN = "(not logged in)";
 const NEVER_LOGGED_IN = "(never logged in)";
@@ -56,6 +58,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       return runAdd({ alias: argv[1], stateDir, stdout, stderr });
     case "ls":
       return runLs({ stateDir, stdout, stderr, claudePort });
+    case "login":
+      return runLogin(argv.slice(1), { stateDir, stdout, stderr, claudePort });
     default:
       stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
       return 1;
@@ -84,7 +88,7 @@ async function runWhoami(deps: {
     return reportError(deps.stderr, err);
   }
 
-  deps.stdout(formatWhoami(alias, status));
+  deps.stdout(formatIdentity(alias, status));
   return 0;
 }
 
@@ -96,14 +100,82 @@ function reportError(stderr: (line: string) => void, err: unknown): number {
 }
 
 /**
- * Renders `whoami`'s report. Account/Organization fall back to an explicit `(not logged in)` —
- * a Profile can be Bound but not logged in (CONTEXT.md's Login) — rather than ever printing a
- * blank. A logged-in status missing its email/orgName (permitted by {@link AuthStatus}'s shape,
- * even though the real `claude auth status --json` always supplies both — ADR-0005) falls back
- * to `(unknown)` instead: reusing `(not logged in)` there would be an outright false statement,
- * not an honest fallback.
+ * `ccp login <alias>`: triggers Anthropic's own interactive login flow (it opens a browser),
+ * scoped to the named Profile's own config directory, then records the resulting Account and
+ * Organization as that Profile's expected identity (ADR-0006). Never called by any other
+ * command — Login stays explicit precisely because it opens a browser (CONTEXT.md's Login).
+ *
+ * `alias` need not have gone through `ccp add` beforehand — an alias with no existing registry
+ * entry is provisioned by `addProfile` on the spot, so `ccp login` still works standalone. An
+ * alias `ccp add` already created is reused as-is, so logging in never disturbs a Profile's
+ * existing (and possibly already-populated) registry entry beyond its Expected identity.
  */
-function formatWhoami(alias: string, status: AuthStatus): string {
+async function runLogin(
+  args: string[],
+  deps: {
+    stateDir: string;
+    stdout: (line: string) => void;
+    stderr: (line: string) => void;
+    claudePort: ClaudePort;
+  },
+): Promise<number> {
+  const alias = args[0];
+  if (!alias) {
+    deps.stderr(LOGIN_USAGE);
+    return 1;
+  }
+
+  let configDir: string;
+  try {
+    const registry = await loadRegistry(deps.stateDir);
+    const existing = registry.profiles[alias];
+    configDir = existing ? existing.configDir : (await addProfile(deps.stateDir, alias)).configDir;
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  try {
+    await deps.claudePort.login(configDir);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  let status: AuthStatus;
+  try {
+    status = await deps.claudePort.authStatus(configDir);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  if (!status.loggedIn) {
+    deps.stderr(`'${alias}' finished the login flow but is still not logged in.`);
+    return 1;
+  }
+
+  // A logged-in status without both fields is permitted by AuthStatus's shape (ADR-0005), even
+  // though the real `claude auth status --json` never omits them. Recording a placeholder in
+  // their place would fabricate Expected identity data instead of honestly reporting the gap, so
+  // this fails loudly rather than persisting anything.
+  if (status.email === undefined || status.orgName === undefined) {
+    deps.stderr(`'${alias}' logged in, but claude did not report an Account email or Organization — nothing was recorded.`);
+    return 1;
+  }
+
+  await recordExpectedIdentity(deps.stateDir, alias, { email: status.email, orgName: status.orgName });
+
+  deps.stdout(formatIdentity(alias, status));
+  return 0;
+}
+
+/**
+ * Renders an identity report shared by `whoami` and `login`. Account/Organization fall back to
+ * an explicit `(not logged in)` — a Profile can be Bound but not logged in (CONTEXT.md's Login)
+ * — rather than ever printing a blank. A logged-in status missing its email/orgName (permitted
+ * by {@link AuthStatus}'s shape, even though the real `claude auth status --json` always
+ * supplies both — ADR-0005) falls back to `(unknown)` instead: reusing `(not logged in)` there
+ * would be an outright false statement, not an honest fallback.
+ */
+function formatIdentity(alias: string, status: AuthStatus): string {
   const account = !status.loggedIn ? NOT_LOGGED_IN : status.email ?? UNKNOWN;
   const organization = !status.loggedIn ? NOT_LOGGED_IN : status.orgName ?? UNKNOWN;
   return [`Alias:        ${alias}`, `Account:      ${account}`, `Organization: ${organization}`].join("\n");
@@ -159,7 +231,7 @@ async function runLs(deps: {
   const lines = Object.entries(profiles)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([alias, record]) => {
-      const identity = record.expectedIdentity ? formatIdentity(record.expectedIdentity) : NEVER_LOGGED_IN;
+      const identity = record.expectedIdentity ? formatAccountAndOrg(record.expectedIdentity) : NEVER_LOGGED_IN;
       return `${alias}: ${identity}`;
     });
 
@@ -172,7 +244,7 @@ async function runLs(deps: {
 
   const defaultIdentity = !defaultStatus.loggedIn
     ? NOT_LOGGED_IN
-    : formatIdentity({ email: defaultStatus.email ?? UNKNOWN, orgName: defaultStatus.orgName ?? UNKNOWN });
+    : formatAccountAndOrg({ email: defaultStatus.email ?? UNKNOWN, orgName: defaultStatus.orgName ?? UNKNOWN });
   lines.push(`${DEFAULT_INSTALL_ALIAS}: ${defaultIdentity} [unmanaged]`);
 
   deps.stdout(lines.join("\n"));
@@ -181,6 +253,6 @@ async function runLs(deps: {
 
 /** Renders an (Account, Organization) pair the way both a recorded Expected identity and a live
  * {@link AuthStatus} are shown in `ccp ls` — the one shape both call sites share. */
-function formatIdentity(identity: { email: string; orgName: string }): string {
+function formatAccountAndOrg(identity: { email: string; orgName: string }): string {
   return `${identity.email} (${identity.orgName})`;
 }

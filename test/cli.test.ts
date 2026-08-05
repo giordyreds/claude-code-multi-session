@@ -13,11 +13,24 @@ function captureLines(): { stdout: string[]; stderr: string[]; stdoutFn: (line: 
   return { stdout, stderr, stdoutFn: (line) => stdout.push(line), stderrFn: (line) => stderr.push(line) };
 }
 
-/** A fake ClaudePort that resolves to a fixed AuthStatus and records what it was asked. */
-function fakeClaudePort(status: AuthStatus): ClaudePort & { calls: Array<string | undefined> } {
+/**
+ * A fake ClaudePort that resolves `authStatus` to a fixed AuthStatus and records what it was
+ * asked. `login` succeeds by default (or rejects with `loginError`, if given) and records its own
+ * calls separately, so tests can assert login was (or wasn't) triggered independently of whoami.
+ */
+function fakeClaudePort(
+  status: AuthStatus,
+  options?: { loginError?: string },
+): ClaudePort & { calls: Array<string | undefined>; loginCalls: Array<string | undefined> } {
   const calls: Array<string | undefined> = [];
+  const loginCalls: Array<string | undefined> = [];
   return {
     calls,
+    loginCalls,
+    async login(configDir?: string) {
+      loginCalls.push(configDir);
+      if (options?.loginError) throw new Error(options.loginError);
+    },
     async authStatus(configDir?: string) {
       calls.push(configDir);
       return status;
@@ -27,6 +40,7 @@ function fakeClaudePort(status: AuthStatus): ClaudePort & { calls: Array<string 
 
 function throwingClaudePort(message: string): ClaudePort {
   return {
+    async login() {},
     async authStatus() {
       throw new Error(message);
     },
@@ -91,6 +105,8 @@ describe("runCli whoami", () => {
     expect(report).not.toMatch(/\(not logged in\)/);
     // Unbound: no directory override, so the port falls through to whichever install is ambient.
     expect(claudePort.calls).toEqual([undefined]);
+    // Login is never triggered implicitly by any other command (CONTEXT.md's Login).
+    expect(claudePort.loginCalls).toEqual([]);
   });
 
   it("reports the bound Profile's Alias (its config directory's basename) and resolved identity", async () => {
@@ -265,5 +281,171 @@ describe("runCli ls", () => {
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/registry/i);
+  });
+});
+
+describe("runCli login", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-login-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("requires an alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["login"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+    expect(claudePort.loginCalls).toEqual([]);
+  });
+
+  it("rejects an alias that would escape the state directory, without touching the login flow", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["login", "../etc"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/alias/i);
+    expect(claudePort.loginCalls).toEqual([]);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry).toEqual({ profiles: {} });
+  });
+
+  it("auto-provisions a Profile that was never `ccp add`ed, under the same config directory `ccp add` would use", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    const expectedConfigDir = join(stateDir, "profiles", "work");
+    expect(claudePort.loginCalls).toEqual([expectedConfigDir]);
+    expect(claudePort.calls).toEqual([expectedConfigDir]);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toEqual({
+      configDir: expectedConfigDir,
+      expectedIdentity: { email: "work@example.com", orgName: "Work Org" },
+    });
+  });
+
+  it("reuses the config directory `ccp add` already created, rather than provisioning a second one", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const code = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort, stateDir });
+
+    expect(code).toBe(0);
+    expect(claudePort.loginCalls).toEqual([configDir]);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toEqual({
+      configDir,
+      expectedIdentity: { email: "work@example.com", orgName: "Work Org" },
+    });
+  });
+
+  it("fails without recording anything when claude reports logged-in but omits email/orgName", async () => {
+    // AuthStatus's shape permits this even though the real `claude auth status --json` never
+    // does it (ADR-0005) — recording a placeholder here would fabricate Expected identity data.
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true });
+
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/did not report/i);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toBeNull();
+  });
+
+  it("logs a Profile in, scoped to its own config directory, and records the resulting identity", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    const expectedConfigDir = join(stateDir, "profiles", "work");
+    expect(claudePort.loginCalls).toEqual([expectedConfigDir]);
+    expect(claudePort.calls).toEqual([expectedConfigDir]);
+    const report = stdout.join("\n");
+    expect(report).toMatch(/work@example\.com/);
+    expect(report).toMatch(/Work Org/);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toEqual({
+      email: "work@example.com",
+      orgName: "Work Org",
+    });
+  });
+
+  it("fails without recording anything when the login flow itself fails", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false }, { loginError: "user closed the browser" });
+
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/closed the browser/);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toBeNull();
+  });
+
+  it("fails without recording anything when the Profile is still not logged in afterwards", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toBeNull();
+  });
+
+  it("logging in one Profile leaves every other Profile's recorded identity intact", async () => {
+    // Real registry file under a real temp stateDir (no fake) — only the unavoidable, unautomatable
+    // part (the actual `claude auth login` browser flow) is faked. This is the isolation
+    // acceptance criterion, verified against real behaviour rather than a fake.
+    const workPort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const codeWork = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort: workPort, stateDir });
+    expect(codeWork).toBe(0);
+
+    const personalPort = fakeClaudePort({ loggedIn: true, email: "me@example.com", orgName: "Personal Org" });
+    const codePersonal = await runCli(["login", "personal"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: personalPort,
+      stateDir,
+    });
+    expect(codePersonal).toBe(0);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toEqual({
+      email: "work@example.com",
+      orgName: "Work Org",
+    });
+    expect(registry.profiles.personal?.expectedIdentity).toEqual({
+      email: "me@example.com",
+      orgName: "Personal Org",
+    });
   });
 });
