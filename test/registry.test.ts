@@ -1,4 +1,4 @@
-import { mkdir, readlink, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readlink, stat, writeFile } from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -202,6 +202,24 @@ describe("addProfile", () => {
 
     const dirStat = await stat(result.configDir);
     expect(dirStat.isDirectory()).toBe(true);
+  });
+
+  it("renders a settings.json extended with the Profile status-line Alias indicator (ticket #10)", async () => {
+    await writeFile(join(installDir, "settings.json"), JSON.stringify({ model: "sonnet" }), "utf8");
+
+    const result = await addProfile(stateDir, "work", installDir);
+
+    const rendered = JSON.parse(await readFile(join(result.configDir, "settings.json"), "utf8"));
+    expect(rendered.model).toBe("sonnet");
+    expect(rendered.statusLine.type).toBe("command");
+    expect(rendered.statusLine.command).toMatch(/CLAUDE_CONFIG_DIR/);
+  });
+
+  it("still renders settings.json when the Default install has none of its own yet", async () => {
+    const result = await addProfile(stateDir, "work", installDir);
+
+    const rendered = JSON.parse(await readFile(join(result.configDir, "settings.json"), "utf8"));
+    expect(rendered.statusLine.type).toBe("command");
   });
 });
 
