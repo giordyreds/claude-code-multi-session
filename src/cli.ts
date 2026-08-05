@@ -3,6 +3,7 @@ import { join, resolve as resolvePath } from "node:path";
 import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
 import { isDrifted } from "./drift.js";
+import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
 import {
   addProfile,
   DEFAULT_INSTALL_ALIAS,
@@ -11,13 +12,13 @@ import {
   recordExpectedIdentity,
   type ExpectedIdentity,
   type ProfileRecord,
+  type Registry,
 } from "./registry.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use <alias>        Bind the current shell to a Profile (via the `ccp` shell function)\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity";
+  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
-const USE_USAGE = "Usage: ccp use <alias>";
 const RECONCILE_USAGE = "Usage: ccp reconcile <alias>";
 
 const NOT_LOGGED_IN = "(not logged in)";
@@ -61,6 +62,12 @@ export interface RunCliOptions {
   /** Test seam: the Default install's configuration directory — the source of the Rig shared
    * into every newly added Profile (ADR-0007). Defaults to `~/.claude`. */
   installDir?: string;
+  /**
+   * Test seam: replaces the interactive picker `ccp use` shows when invoked with no Alias (see
+   * ticket #9). Defaults to a real {@link TtyPicker} reading `process.stdin`, drawing on
+   * `process.stderr` — never stdout, per ADR-0004.
+   */
+  picker?: Picker;
 }
 
 /** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
@@ -71,6 +78,7 @@ interface CliDeps {
   claudePort: ClaudePort;
   stateDir: string;
   installDir: string;
+  picker: Picker;
 }
 
 /**
@@ -84,13 +92,14 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const claudePort = options.claudePort ?? new ClaudeCliPort();
   const stateDir = options.stateDir ?? defaultStateDir(env);
   const installDir = options.installDir ?? defaultInstallDir();
+  const picker = options.picker ?? new TtyPicker();
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
     return 0;
   }
 
-  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir };
+  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir, picker };
 
   switch (argv[0]) {
     case "whoami":
@@ -102,7 +111,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     case "login":
       return runLogin(argv.slice(1), { stateDir, installDir, stdout, stderr, claudePort });
     case "use":
-      return runUse(argv[1], { stateDir, stdout, stderr, claudePort });
+      return runUse(argv[1], deps);
     case "reconcile":
       return runReconcile(argv[1], { stateDir, stdout, stderr, claudePort });
     default:
@@ -209,28 +218,48 @@ async function runLogin(
 }
 
 /**
- * `ccp use <alias>`: Binding (CONTEXT.md), the `ccp` shell function's counterpart. Prints
- * **only** `export CLAUDE_CONFIG_DIR=...` to stdout — per ADR-0004 that line is the one thing the
- * shell function evaluates, so every diagnostic below goes to stderr instead, and a rejection
- * (unknown Alias, or a hard {@link ClaudePort} failure) must print nothing to stdout at all,
- * leaving the calling shell unmodified.
+ * `ccp use <alias>`: prints the `export CLAUDE_CONFIG_DIR=...` line the `ccp` shell function
+ * (ADR-0004) evaluates to bind the calling shell to a Profile. Per ADR-0004, **only** that
+ * export statement ever reaches stdout — every diagnostic below goes to stderr, and binding
+ * still succeeds (still prints the export) for every diagnostic except an unknown Alias or a
+ * hard {@link ClaudePort}/registry failure, neither of which leaves a Profile to bind to.
+ *
+ * Unlike `ccp login`, `use` never provisions a Profile that isn't already registered — Binding
+ * never opens a browser or authenticates (this ticket's own acceptance criteria), and creating a
+ * Profile on the fly here would let `ccp use` silently originate one instead of `ccp add`/`ccp
+ * login`.
+ *
+ * With no Alias (ticket #9), the Alias comes from an interactive picker instead of the argument
+ * list — see {@link pickAlias}. Everything from here on treats a picked Alias exactly like one
+ * typed on the command line, including a fresh {@link ClaudePort#authStatus} query even though
+ * the picker already resolved one: the picker can sit open for a while before the user commits,
+ * so binding re-checks rather than trusting a possibly-stale snapshot.
  *
  * Verifies the Profile's identity as part of Binding and reports a logged-out or drifted Profile
  * on stderr (ticket #8's Drift detection) — but Binding still succeeds either way. Drift is a
  * warning, never a block: the whole point is that the user finds out *before* running `claude`
  * under the wrong identity, not that Binding refuses to happen.
  */
-async function runUse(
-  alias: string | undefined,
-  deps: { stateDir: string; stdout: (line: string) => void; stderr: (line: string) => void; claudePort: ClaudePort },
-): Promise<number> {
-  if (!alias) {
-    deps.stderr(USE_USAGE);
-    return 1;
+async function runUse(aliasArg: string | undefined, deps: CliDeps): Promise<number> {
+  let registry: Registry;
+  try {
+    registry = await loadRegistry(deps.stateDir);
+  } catch (err) {
+    return reportError(deps.stderr, err);
   }
 
-  const record = await resolveKnownProfile(deps, alias);
-  if (!record) return 1;
+  let alias = aliasArg;
+  if (!alias) {
+    const picked = await pickAlias(registry, deps);
+    if (picked === undefined) return 1;
+    alias = picked;
+  }
+
+  const record = registry.profiles[alias];
+  if (!record) {
+    deps.stderr(`Unknown Alias '${alias}': no Profile named '${alias}' is registered. Run 'ccp add ${alias}' first.`);
+    return 1;
+  }
 
   let status: AuthStatus;
   try {
@@ -256,7 +285,8 @@ function shellQuote(value: string): string {
 /**
  * Loads the registry and looks up `alias`'s entry, reporting an actionable error to stderr — and
  * resolving `undefined` — when the registry can't be read or `alias` isn't registered. The one
- * lookup `ccp use` and `ccp reconcile` share.
+ * lookup `ccp reconcile` uses (`ccp use` inlines the same lookup itself — see {@link runUse} —
+ * since it already has the registry in hand from resolving a picked Alias).
  */
 async function resolveKnownProfile(
   deps: { stateDir: string; stderr: (line: string) => void },
@@ -442,10 +472,7 @@ async function runLs(deps: CliDeps): Promise<number> {
     return reportError(deps.stderr, err);
   }
 
-  const defaultIdentity = !defaultStatus.loggedIn
-    ? NOT_LOGGED_IN
-    : formatAccountAndOrg({ email: defaultStatus.email ?? UNKNOWN, orgName: defaultStatus.orgName ?? UNKNOWN });
-  lines.push(`${DEFAULT_INSTALL_ALIAS}: ${defaultIdentity} [unmanaged]`);
+  lines.push(`${DEFAULT_INSTALL_ALIAS}: ${formatLiveIdentity(defaultStatus)} [unmanaged]`);
 
   deps.stdout(lines.join("\n"));
   return 0;
@@ -456,4 +483,54 @@ async function runLs(deps: CliDeps): Promise<number> {
  * every call site shares. */
 function formatAccountAndOrg(identity: { email: string; orgName: string }): string {
   return `${identity.email} (${identity.orgName})`;
+}
+
+/** Renders a live {@link AuthStatus} the way `ccp ls`'s Default-install row and the picker's rows
+ * (ticket #9) both need it: an explicit `(not logged in)` rather than a blank, otherwise the
+ * resolved Account/Organization pair. */
+function formatLiveIdentity(status: AuthStatus): string {
+  return !status.loggedIn
+    ? NOT_LOGGED_IN
+    : formatAccountAndOrg({ email: status.email ?? UNKNOWN, orgName: status.orgName ?? UNKNOWN });
+}
+
+/**
+ * `ccp use` with no Alias (ticket #9): shows an interactive picker listing every registered
+ * Profile alongside the Account/Organization it currently resolves to, and resolves to the
+ * chosen Profile's Alias. Resolves `undefined` — with the reason already reported to stderr, or
+ * silently for a plain cancellation — whenever `runUse` has nothing to bind: no Profiles are
+ * registered, a Profile's identity couldn't be resolved, the picker itself rejects (no
+ * interactive terminal — {@link TtyPicker}), or the user cancelled it.
+ *
+ * Every row's identity is resolved with `Promise.all`, not a sequential loop, so the picker opens
+ * as soon as the slowest single Profile resolves rather than after the sum of every Profile's
+ * resolution time — this ticket's "opens promptly with several Profiles" acceptance criterion.
+ */
+async function pickAlias(registry: Registry, deps: CliDeps): Promise<string | undefined> {
+  const aliases = Object.keys(registry.profiles).sort((a, b) => a.localeCompare(b));
+  if (aliases.length === 0) {
+    deps.stderr("No Profiles are registered. Run 'ccp add <alias>' first.");
+    return undefined;
+  }
+
+  let rows: PickerRow[];
+  try {
+    rows = await Promise.all(
+      aliases.map(async (alias) => {
+        const record = registry.profiles[alias]!;
+        const status = await deps.claudePort.authStatus(record.configDir);
+        return { alias, label: `${alias}: ${formatLiveIdentity(status)}` };
+      }),
+    );
+  } catch (err) {
+    reportError(deps.stderr, err);
+    return undefined;
+  }
+
+  try {
+    return await deps.picker.pick(rows);
+  } catch (err) {
+    reportError(deps.stderr, err);
+    return undefined;
+  }
 }
