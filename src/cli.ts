@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
+import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
 import { isDrifted } from "./drift.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
 import {
@@ -16,9 +17,10 @@ import {
 } from "./registry.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity";
+  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
+const RUN_USAGE = "Usage: ccp run <alias> -- <command> [args...]";
 const RECONCILE_USAGE = "Usage: ccp reconcile <alias>";
 
 const NOT_LOGGED_IN = "(not logged in)";
@@ -68,6 +70,12 @@ export interface RunCliOptions {
    * `process.stderr` — never stdout, per ADR-0004.
    */
   picker?: Picker;
+  /**
+   * Test seam: replaces the real spawn behind `ccp run <alias> -- <command>` (ticket #11), so
+   * tests never spawn a real child process. Defaults to a real {@link CommandRunner} that
+   * inherits stdio.
+   */
+  commandRunner?: CommandRunner;
 }
 
 /** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
@@ -79,6 +87,7 @@ interface CliDeps {
   stateDir: string;
   installDir: string;
   picker: Picker;
+  commandRunner: CommandRunner;
 }
 
 /**
@@ -93,6 +102,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const stateDir = options.stateDir ?? defaultStateDir(env);
   const installDir = options.installDir ?? defaultInstallDir();
   const picker = options.picker ?? new TtyPicker();
+  const commandRunner = options.commandRunner ?? runCommand;
+  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, picker, commandRunner };
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -112,6 +123,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       return runLogin(argv.slice(1), { stateDir, installDir, stdout, stderr, claudePort });
     case "use":
       return runUse(argv[1], deps);
+    case "run":
+      return runRun(argv.slice(1), deps);
     case "reconcile":
       return runReconcile(argv[1], { stateDir, stdout, stderr, claudePort });
     default:
@@ -285,8 +298,8 @@ function shellQuote(value: string): string {
 /**
  * Loads the registry and looks up `alias`'s entry, reporting an actionable error to stderr — and
  * resolving `undefined` — when the registry can't be read or `alias` isn't registered. The one
- * lookup `ccp reconcile` uses (`ccp use` inlines the same lookup itself — see {@link runUse} —
- * since it already has the registry in hand from resolving a picked Alias).
+ * lookup `ccp reconcile` and `ccp run` use (`ccp use` inlines the same lookup itself — see
+ * {@link runUse} — since it already has the registry in hand from resolving a picked Alias).
  */
 async function resolveKnownProfile(
   deps: { stateDir: string; stderr: (line: string) => void },
@@ -307,6 +320,42 @@ async function resolveKnownProfile(
   }
 
   return record;
+}
+
+/**
+ * `ccp run <alias> -- <command> [args...]` (ticket #11): one-shot execution under a Profile's
+ * identity, for scripts, jobs, and other non-interactive callers where the `ccp` shell function
+ * was never sourced. Unlike `ccp use`, this never touches the invoking shell at all — no export
+ * line, nothing to `eval` — it spawns `<command>` directly with `CLAUDE_CONFIG_DIR` set to the
+ * resolved Profile's config directory, hands it the real terminal (stdio inherited), and resolves
+ * to its exit code, so stdout, stderr, and exit status all pass through untouched. That's also
+ * why `shell/ccp.sh` needs no special case for `run`: it already forwards anything but `use`
+ * straight to `command ccp "$@"`.
+ *
+ * The literal `--` before `<command>` is required, at a fixed position right after `<alias>`, so
+ * a command's own flags (`ccp run work -- git log --oneline`) are never mistaken for `ccp run`'s
+ * own. An unknown Alias is rejected before `<command>` ever spawns — resolved via
+ * {@link resolveKnownProfile}, the same lookup `ccp reconcile` uses.
+ */
+async function runRun(args: string[], deps: CliDeps): Promise<number> {
+  const alias = args[0];
+  if (!alias || args[1] !== "--" || args.length < 3) {
+    deps.stderr(RUN_USAGE);
+    return 1;
+  }
+
+  const record = await resolveKnownProfile(deps, alias);
+  if (!record) return 1;
+
+  const [command, ...commandArgs] = args.slice(2);
+  const env: NodeJS.ProcessEnv = { ...deps.env, CLAUDE_CONFIG_DIR: record.configDir };
+
+  try {
+    const result = await deps.commandRunner(command!, commandArgs, { env });
+    return resolveExitCode(result);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
 }
 
 /**
