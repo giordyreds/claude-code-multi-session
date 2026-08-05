@@ -81,8 +81,9 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const stdout = options.stdout ?? ((line: string) => console.log(line));
   const stderr = options.stderr ?? ((line: string) => console.error(line));
   const claudePort = options.claudePort ?? new ClaudeCliPort();
-  const stateDir = options.stateDir ?? defaultStateDir();
+  const stateDir = options.stateDir ?? defaultStateDir(env);
   const installDir = options.installDir ?? defaultInstallDir();
+  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir };
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -97,7 +98,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     case "ls":
       return runLs(deps);
     case "login":
-      return runLogin(argv.slice(1), { stateDir, stdout, stderr, claudePort });
+      return runLogin(argv.slice(1), { stateDir, installDir, stdout, stderr, claudePort });
     case "use":
       return runUse(argv[1], { stateDir, stdout, stderr, claudePort });
     case "reconcile":
@@ -447,65 +448,3 @@ function formatAccountAndOrg(identity: { email: string; orgName: string }): stri
   return `${identity.email} (${identity.orgName})`;
 }
 
-/**
- * `ccp use <alias>`: prints the `export CLAUDE_CONFIG_DIR=...` line the `ccp` shell function
- * (ADR-0004) evaluates to bind the calling shell to a Profile. Per ADR-0004, **only** that
- * export statement ever reaches stdout — every diagnostic below goes to stderr, and binding
- * still succeeds (still prints the export) for every diagnostic except an unknown Alias or a
- * hard {@link ClaudePort}/registry failure, neither of which leaves a Profile to bind to.
- *
- * Unlike `ccp login`, `use` never provisions a Profile that isn't already registered — Binding
- * never opens a browser or authenticates (this ticket's own acceptance criteria), and creating a
- * Profile on the fly here would let `ccp use` silently originate one instead of `ccp add`/`ccp
- * login`.
- */
-async function runUse(alias: string | undefined, deps: CliDeps): Promise<number> {
-  if (!alias) {
-    deps.stderr(USE_USAGE);
-    return 1;
-  }
-
-  let registry;
-  try {
-    registry = await loadRegistry(deps.stateDir);
-  } catch (err) {
-    return reportError(deps.stderr, err);
-  }
-
-  const record = registry.profiles[alias];
-  if (!record) {
-    deps.stderr(`Unknown Alias '${alias}': no Profile named '${alias}' is registered. Run 'ccp add ${alias}' first.`);
-    return 1;
-  }
-
-  let status: AuthStatus;
-  try {
-    status = await deps.claudePort.authStatus(record.configDir);
-  } catch (err) {
-    return reportError(deps.stderr, err);
-  }
-
-  if (!status.loggedIn) {
-    deps.stderr(`Profile '${alias}' is not logged in.`);
-  } else if (record.expectedIdentity && hasDrifted(record.expectedIdentity, status)) {
-    const observed = { email: status.email ?? UNKNOWN, orgName: status.orgName ?? UNKNOWN };
-    deps.stderr(
-      `Profile '${alias}' has drifted: expected ${formatAccountAndOrg(record.expectedIdentity)}, observed ${formatAccountAndOrg(observed)}.`,
-    );
-  }
-
-  deps.stdout(`export CLAUDE_CONFIG_DIR=${shellQuote(record.configDir)}`);
-  return 0;
-}
-
-/** CONTEXT.md's **Drift**: the observed identity no longer matches what was expected. Once
- * recorded, a registry {@link ExpectedIdentity} always carries both fields (`recordExpectedIdentity`
- * never persists a partial one — see `ccp login`), so comparison needs no per-field optionality. */
-function hasDrifted(expected: ExpectedIdentity, observed: AuthStatus): boolean {
-  return expected.email !== observed.email || expected.orgName !== observed.orgName;
-}
-
-/** Single-quotes a value for safe `sh`/`zsh` evaluation — the only shape of output ADR-0004 permits on stdout. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
