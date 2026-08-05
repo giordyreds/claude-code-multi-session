@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
-import { runCommand, type CommandRunner } from "./command-runner.js";
+import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
 import { isDrifted } from "./drift.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
 import {
@@ -17,7 +17,7 @@ import {
 } from "./registry.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  run <alias> -- <command>  One-shot: run <command> under a Profile's identity, no shell\n                     function required\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity";
+  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
 const RUN_USAGE = "Usage: ccp run <alias> -- <command> [args...]";
@@ -340,8 +340,8 @@ async function runRun(args: string[], deps: CliDeps): Promise<number> {
   const env: NodeJS.ProcessEnv = { ...deps.env, CLAUDE_CONFIG_DIR: record.configDir };
 
   try {
-    const { exitCode } = await deps.commandRunner(command!, commandArgs, { env });
-    return exitCode ?? 1;
+    const result = await deps.commandRunner(command!, commandArgs, { env });
+    return resolveExitCode(result);
   } catch (err) {
     return reportError(deps.stderr, err);
   }

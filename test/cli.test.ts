@@ -67,14 +67,16 @@ function delay(ms: number): Promise<void> {
 }
 
 /** A fake {@link CommandRunner}: records every command it was asked to run and resolves the given
- * exit code without ever spawning a real process. */
+ * exit code (and, for a signal-killed command, `signal` instead) without ever spawning a real
+ * process. */
 function fakeCommandRunner(
   exitCode: number | null,
+  signal: NodeJS.Signals | null = null,
 ): CommandRunner & { calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> } {
   const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
   const runner = async (command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => {
     calls.push({ command, args, env: options.env });
-    return { exitCode };
+    return { exitCode, signal };
   };
   return Object.assign(runner, { calls });
 }
@@ -1093,6 +1095,16 @@ describe("runCli run", () => {
     const code = await runCli(["run", "work", "--", "false"], { stateDir, stdout: stdoutFn, stderr: stderrFn, commandRunner });
 
     expect(code).toBe(42);
+  });
+
+  it("maps a signal-killed command to the 128+signal convention, rather than collapsing it to the same code as a normal exit 1", async () => {
+    await addProfile(stateDir, "work", installDir);
+    const { stdoutFn, stderrFn } = captureLines();
+    const commandRunner = fakeCommandRunner(null, "SIGTERM");
+
+    const code = await runCli(["run", "work", "--", "sleep", "100"], { stateDir, stdout: stdoutFn, stderr: stderrFn, commandRunner });
+
+    expect(code).toBe(128 + 15); // SIGTERM is signal 15
   });
 
   it("sends a hard command-runner failure (e.g. an unspawnable command) to stderr, never stdout, and exits 1", async () => {
