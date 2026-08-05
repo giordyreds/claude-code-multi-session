@@ -131,6 +131,28 @@ describe.skipIf(!zshAvailable)("ccp shell function (zsh integration)", () => {
     expect(stderr).toMatch(/unknown alias 'ghost'/i);
   });
 
+  it("fails without hanging, and leaves the shell unchanged, when `ccp use` is given no Alias outside an interactive terminal", () => {
+    // `spawnSync` never attaches a pty, so this is the real non-interactive path ticket #9's own
+    // acceptance criterion describes — not a simulation of it. If the picker ever blocked on
+    // stdin here instead of rejecting immediately, this test would hang until vitest's own
+    // timeout killed it.
+    const { stdout, stderr, status } = runInZsh(
+      `source ${JSON.stringify(join(repoRoot, "shell", "ccp.sh"))}
+       ccp add work >/dev/null
+       ccp use
+       echo "STATUS:$?"
+       echo "CONFIG_DIR:${"$"}{CLAUDE_CONFIG_DIR:-<unset>}"
+       echo STILL_ALIVE`,
+      JSON.stringify({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    );
+
+    expect(status).toBe(0);
+    expect(stdout).toContain("STATUS:1");
+    expect(stdout).toContain("CONFIG_DIR:<unset>");
+    expect(stdout).toContain("STILL_ALIVE");
+    expect(stderr).toMatch(/interactive terminal/i);
+  });
+
   it("lets two shells bound to different Profiles each report their own Account and Organization, undisturbed by the other", () => {
     // Two separate zsh processes — as close as a single test gets to "two shells at once" —
     // each adding then binding then immediately asking `ccp whoami`, the actual command
