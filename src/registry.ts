@@ -1,5 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isErrnoException } from "./fs-utils.js";
+import { shareRig } from "./rig.js";
 
 /** The (Account, Organization) a Profile is recorded as resolving to — see CONTEXT.md's
  * **Expected identity**. `null` until something (`ccp login`, or a future Reconciliation command)
@@ -75,11 +77,16 @@ export async function saveRegistry(stateDir: string, registry: Registry): Promis
 }
 
 /**
- * Creates a Profile named `alias`: an isolated, empty configuration directory under `stateDir`,
- * registered in the registry with no {@link ExpectedIdentity} yet. Checks for a duplicate Alias
- * before touching the filesystem or the registry, so a rejected `add` changes nothing.
+ * Creates a Profile named `alias`: an isolated configuration directory under `stateDir` with the
+ * Rig shared into it from `installDir` (ADR-0007), registered in the registry with no
+ * {@link ExpectedIdentity} yet. Checks for a duplicate Alias before touching the filesystem or
+ * the registry, so a rejected `add` changes nothing.
  */
-export async function addProfile(stateDir: string, alias: string): Promise<{ alias: string; configDir: string }> {
+export async function addProfile(
+  stateDir: string,
+  alias: string,
+  installDir: string,
+): Promise<{ alias: string; configDir: string }> {
   if (alias === DEFAULT_INSTALL_ALIAS) {
     throw new Error(`'${DEFAULT_INSTALL_ALIAS}' is reserved for the Default install and can't be used as an Alias.`);
   }
@@ -96,6 +103,7 @@ export async function addProfile(stateDir: string, alias: string): Promise<{ ali
 
   const configDir = join(stateDir, "profiles", alias);
   await mkdir(configDir, { recursive: true });
+  await shareRig(installDir, configDir);
 
   registry.profiles[alias] = { configDir, expectedIdentity: null, drifted: false };
   await saveRegistry(stateDir, registry);
@@ -223,8 +231,4 @@ function validateExpectedIdentity(value: unknown, alias: string, path: string): 
   }
 
   return { email: value.email, orgName: value.orgName };
-}
-
-function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
-  return err instanceof Error && "code" in err;
 }

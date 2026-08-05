@@ -1,10 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
-import { loadRegistry } from "../src/registry.js";
+import { addProfile, loadRegistry, recordExpectedIdentity } from "../src/registry.js";
 
 /** Captures every line written to stdout/stderr, in order, for assertion. */
 function captureLines(): { stdout: string[]; stderr: string[]; stdoutFn: (line: string) => void; stderrFn: (line: string) => void } {
@@ -171,19 +171,22 @@ describe("runCli whoami", () => {
 
 describe("runCli add", () => {
   let stateDir: string;
+  let installDir: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-add-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-add-install-"));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
   });
 
   it("creates a Profile and registers its Alias", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
 
-    const code = await runCli(["add", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+    const code = await runCli(["add", "work"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
@@ -194,12 +197,26 @@ describe("runCli add", () => {
     expect(registry.profiles.work?.expectedIdentity).toBeNull();
   });
 
+  it("shares the Rig from the Default install into the new Profile, without duplicating it", async () => {
+    await writeFile(join(installDir, "CLAUDE.md"), "# Instructions", "utf8");
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const code = await runCli(["add", "work"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+
+    const registry = await loadRegistry(stateDir);
+    const configDir = registry.profiles.work!.configDir;
+    expect(await readlink(join(configDir, "CLAUDE.md"))).toBe(join(installDir, "CLAUDE.md"));
+  });
+
   it("rejects a duplicate Alias with an actionable message on stderr and changes nothing", async () => {
-    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
     const registryBefore = await loadRegistry(stateDir);
 
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const code = await runCli(["add", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+    const code = await runCli(["add", "work"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -212,7 +229,7 @@ describe("runCli add", () => {
   it("requires an alias argument", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
 
-    const code = await runCli(["add"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+    const code = await runCli(["add"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -222,7 +239,7 @@ describe("runCli add", () => {
   it("rejects '(default)' as an Alias since it's reserved for the Default install", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
 
-    const code = await runCli(["add", "(default)"], { stateDir, stdout: stdoutFn, stderr: stderrFn });
+    const code = await runCli(["add", "(default)"], { stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -232,17 +249,20 @@ describe("runCli add", () => {
 
 describe("runCli ls", () => {
   let stateDir: string;
+  let installDir: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-ls-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-ls-install-"));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
   });
 
   it("lists a never-logged-in Profile alongside the Default install, marked unmanaged", async () => {
-    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
     const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
 
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
@@ -286,20 +306,23 @@ describe("runCli ls", () => {
 
 describe("runCli login", () => {
   let stateDir: string;
+  let installDir: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-login-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-login-install-"));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
   });
 
   it("requires an alias", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false });
 
-    const code = await runCli(["login"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -311,7 +334,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false });
 
-    const code = await runCli(["login", "../etc"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "../etc"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -326,7 +349,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
@@ -343,11 +366,11 @@ describe("runCli login", () => {
   });
 
   it("reuses the config directory `ccp add` already created, rather than provisioning a second one", async () => {
-    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
     const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
 
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
-    const code = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort, stateDir, installDir });
 
     expect(code).toBe(0);
     expect(claudePort.loginCalls).toEqual([configDir]);
@@ -366,7 +389,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -379,7 +402,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(0);
     expect(stderr).toEqual([]);
@@ -401,7 +424,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false }, { loginError: "user closed the browser" });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -414,7 +437,7 @@ describe("runCli login", () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const claudePort = fakeClaudePort({ loggedIn: false });
 
-    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir });
+    const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
     expect(code).toBe(1);
     expect(stdout).toEqual([]);
@@ -427,7 +450,7 @@ describe("runCli login", () => {
     // part (the actual `claude auth login` browser flow) is faked. This is the isolation
     // acceptance criterion, verified against real behaviour rather than a fake.
     const workPort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
-    const codeWork = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort: workPort, stateDir });
+    const codeWork = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort: workPort, stateDir, installDir });
     expect(codeWork).toBe(0);
 
     const personalPort = fakeClaudePort({ loggedIn: true, email: "me@example.com", orgName: "Personal Org" });
@@ -437,6 +460,7 @@ describe("runCli login", () => {
       stderr: () => {},
       claudePort: personalPort,
       stateDir,
+      installDir,
     });
     expect(codePersonal).toBe(0);
 
