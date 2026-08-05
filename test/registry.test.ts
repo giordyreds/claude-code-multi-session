@@ -233,7 +233,7 @@ describe("recordExpectedIdentity", () => {
   });
 
   it("clears a previously recorded Drift, since a fresh Expected identity is the new baseline", async () => {
-    await addProfile(stateDir, "work");
+    await addProfile(stateDir, "work", installDir);
     await recordDrift(stateDir, "work", true);
 
     await recordExpectedIdentity(stateDir, "work", { email: "dev@example.com", orgName: "Acme Corp" });
@@ -275,17 +275,20 @@ describe("recordExpectedIdentity", () => {
 
 describe("recordDrift", () => {
   let stateDir: string;
+  let installDir: string;
 
   beforeEach(async () => {
     stateDir = await mkdtemp(join(tmpdir(), "ccp-registry-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-registry-install-"));
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
   });
 
   it("records Drift without disturbing configDir or expectedIdentity", async () => {
-    const { configDir } = await addProfile(stateDir, "work");
+    const { configDir } = await addProfile(stateDir, "work", installDir);
     await recordExpectedIdentity(stateDir, "work", { email: "dev@example.com", orgName: "Acme Corp" });
 
     await recordDrift(stateDir, "work", true);
@@ -299,7 +302,7 @@ describe("recordDrift", () => {
   });
 
   it("can clear a previously recorded Drift", async () => {
-    await addProfile(stateDir, "work");
+    await addProfile(stateDir, "work", installDir);
     await recordDrift(stateDir, "work", true);
 
     await recordDrift(stateDir, "work", false);
@@ -309,8 +312,8 @@ describe("recordDrift", () => {
   });
 
   it("leaves every other alias's Drift state intact", async () => {
-    await addProfile(stateDir, "work");
-    await addProfile(stateDir, "personal");
+    await addProfile(stateDir, "work", installDir);
+    await addProfile(stateDir, "personal", installDir);
 
     await recordDrift(stateDir, "work", true);
 
