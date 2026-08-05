@@ -126,6 +126,27 @@ describe("renderSettings", () => {
     await expect(renderSettings({ baseSettingsPath: basePath, outputSettingsPath: outputPath })).resolves.toBeDefined();
   });
 
+  it("reports changed on the first render, and unchanged on an immediate identical re-render", async () => {
+    await writeFile(basePath, JSON.stringify({ model: "sonnet" }), "utf8");
+
+    const first = await renderSettings({ baseSettingsPath: basePath, outputSettingsPath: outputPath });
+    expect(first.changed).toBe(true);
+
+    const second = await renderSettings({ baseSettingsPath: basePath, outputSettingsPath: outputPath });
+    expect(second.changed).toBe(false);
+    expect(second.settings).toEqual(first.settings);
+  });
+
+  it("reports changed again once the base changes the rendered content", async () => {
+    await writeFile(basePath, JSON.stringify({ model: "sonnet" }), "utf8");
+    await renderSettings({ baseSettingsPath: basePath, outputSettingsPath: outputPath });
+
+    await writeFile(basePath, JSON.stringify({ model: "haiku" }), "utf8");
+    const result = await renderSettings({ baseSettingsPath: basePath, outputSettingsPath: outputPath });
+
+    expect(result.changed).toBe(true);
+  });
+
   it("re-renders without complaint when Claude Code's own runtime write added an unrecognized key, and carries it forward", async () => {
     await writeFile(basePath, JSON.stringify({ model: "sonnet" }), "utf8");
     await renderSettings({ baseSettingsPath: basePath, outputSettingsPath: outputPath });
