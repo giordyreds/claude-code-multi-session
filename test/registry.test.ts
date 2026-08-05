@@ -9,6 +9,7 @@ import {
   loadRegistry,
   recordDrift,
   recordExpectedIdentity,
+  removeProfile,
   saveRegistry,
 } from "../src/registry.js";
 
@@ -325,5 +326,73 @@ describe("recordDrift", () => {
     await expect(recordDrift(stateDir, "ghost", true)).rejects.toThrow(/ghost/);
 
     await expect(loadRegistry(stateDir)).resolves.toEqual({ profiles: {} });
+  });
+});
+
+describe("removeProfile", () => {
+  let stateDir: string;
+  let installDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-registry-test-"));
+    installDir = await mkdtemp(join(tmpdir(), "ccp-registry-install-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
+  });
+
+  it("deletes the Profile's config directory and its registry entry", async () => {
+    const { configDir } = await addProfile(stateDir, "work", installDir);
+
+    await removeProfile(stateDir, "work");
+
+    await expect(stat(configDir)).rejects.toThrow();
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toBeUndefined();
+  });
+
+  it("resolves the removed record", async () => {
+    const { configDir } = await addProfile(stateDir, "work", installDir);
+    await recordExpectedIdentity(stateDir, "work", { email: "dev@example.com", orgName: "Acme Corp" });
+
+    const removed = await removeProfile(stateDir, "work");
+
+    expect(removed).toEqual({
+      configDir,
+      expectedIdentity: { email: "dev@example.com", orgName: "Acme Corp" },
+      drifted: false,
+    });
+  });
+
+  it("never deletes the Rig's shared contents in the Default install — only the Profile's own symlinks to them", async () => {
+    await writeFile(join(installDir, "CLAUDE.md"), "# Instructions", "utf8");
+    await addProfile(stateDir, "work", installDir);
+
+    await removeProfile(stateDir, "work");
+
+    await expect(stat(join(installDir, "CLAUDE.md"))).resolves.toBeDefined();
+  });
+
+  it("leaves every other alias's registry entry and config directory intact", async () => {
+    await addProfile(stateDir, "work", installDir);
+    const { configDir: personalConfigDir } = await addProfile(stateDir, "personal", installDir);
+
+    await removeProfile(stateDir, "work");
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.personal).toBeDefined();
+    await expect(stat(personalConfigDir)).resolves.toBeDefined();
+  });
+
+  it("throws an actionable error and changes nothing for an alias that was never added", async () => {
+    await expect(removeProfile(stateDir, "ghost")).rejects.toThrow(/ghost/);
+
+    await expect(loadRegistry(stateDir)).resolves.toEqual({ profiles: {} });
+  });
+
+  it("refuses to remove the Default install", async () => {
+    await expect(removeProfile(stateDir, DEFAULT_INSTALL_ALIAS)).rejects.toThrow(/default/i);
   });
 });

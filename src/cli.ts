@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
+import { ProcessDaemonPort, type DaemonPort } from "./daemon.js";
 import { isDrifted } from "./drift.js";
 import {
   addProfile,
@@ -9,16 +10,18 @@ import {
   loadRegistry,
   recordDrift,
   recordExpectedIdentity,
+  removeProfile,
   type ExpectedIdentity,
   type ProfileRecord,
 } from "./registry.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use <alias>        Bind the current shell to a Profile (via the `ccp` shell function)\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity";
+  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use <alias>        Bind the current shell to a Profile (via the `ccp` shell function)\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
 const USE_USAGE = "Usage: ccp use <alias>";
 const RECONCILE_USAGE = "Usage: ccp reconcile <alias>";
+const RM_USAGE = "Usage: ccp rm <alias> --yes";
 
 const NOT_LOGGED_IN = "(not logged in)";
 const NEVER_LOGGED_IN = "(never logged in)";
@@ -61,6 +64,9 @@ export interface RunCliOptions {
   /** Test seam: the Default install's configuration directory — the source of the Rig shared
    * into every newly added Profile (ADR-0007). Defaults to `~/.claude`. */
   installDir?: string;
+  /** Test seam: replaces `ccp rm`'s best-effort daemon cleanup (ADR-0001) so tests never depend
+   * on real OS processes. Defaults to a real {@link ProcessDaemonPort}. */
+  daemonPort?: DaemonPort;
 }
 
 /** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
@@ -71,6 +77,7 @@ interface CliDeps {
   claudePort: ClaudePort;
   stateDir: string;
   installDir: string;
+  daemonPort: DaemonPort;
 }
 
 /**
@@ -84,7 +91,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const claudePort = options.claudePort ?? new ClaudeCliPort();
   const stateDir = options.stateDir ?? defaultStateDir(env);
   const installDir = options.installDir ?? defaultInstallDir();
-  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir };
+  const daemonPort = options.daemonPort ?? new ProcessDaemonPort();
+  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir, daemonPort };
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -104,6 +112,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       return runUse(argv[1], deps);
     case "reconcile":
       return runReconcile(argv[1], deps);
+    case "rm":
+      return runRm(argv.slice(1), deps);
     default:
       stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
       return 1;
@@ -353,6 +363,73 @@ async function runReconcile(
   await recordExpectedIdentity(deps.stateDir, alias, identity);
 
   deps.stdout(`Reconciled '${alias}': Expected identity is now ${formatAccountAndOrg(identity)}.`);
+  return 0;
+}
+
+/**
+ * `ccp rm <alias>`: permanently removes a Profile — its registry entry, its isolated config
+ * directory (history included), and, on a best-effort basis, its background daemon (ADR-0001).
+ * Never removes the Default install (checked here by name, ahead of even the confirmation
+ * prompt, so no confirmation wording ever has to talk about it) — {@link removeProfile} enforces
+ * the same rule again, since it's reachable directly too.
+ *
+ * Requires an explicit `--yes` (or `-y`), named in the acceptance criteria as the point of the
+ * confirmation: irreversibly losing a Profile's isolated history. Withheld, this changes nothing
+ * — no daemon touched, no directory removed, no registry write.
+ *
+ * Daemon cleanup runs *after* {@link removeProfile} succeeds, not before: {@link removeProfile}
+ * can still fail (a filesystem error, a race), and it must stay all-or-nothing — the registry
+ * entry and config directory either both go or neither does. Running the daemon step last means a
+ * failed removal never leaves a Profile alive with its daemon already killed out from under it.
+ * The daemon step's own failure only ever warns (ticket's own acceptance criteria: best-effort,
+ * never blocking) — by the time it runs, the removal it might fail to clean up after has already
+ * succeeded. Binding to the alias being removed is reported the same way `ccp use`'s Drift is: a
+ * warning on stderr, never a block, since a shell already bound is Binding's own property
+ * (CONTEXT.md) and clears on its own once nothing is left to point at.
+ */
+async function runRm(args: string[], deps: CliDeps): Promise<number> {
+  const alias = args[0];
+  if (!alias) {
+    deps.stderr(RM_USAGE);
+    return 1;
+  }
+
+  if (alias === DEFAULT_INSTALL_ALIAS) {
+    deps.stderr(`'${DEFAULT_INSTALL_ALIAS}' is the Default install and can never be removed.`);
+    return 1;
+  }
+
+  const record = await resolveKnownProfile(deps, alias);
+  if (!record) return 1;
+
+  const confirmed = args.slice(1).some((arg) => arg === "--yes" || arg === "-y");
+  if (!confirmed) {
+    deps.stderr(
+      `Removing '${alias}' permanently deletes its configuration and isolated history — this cannot be undone. Re-run 'ccp rm ${alias} --yes' to confirm.`,
+    );
+    return 1;
+  }
+
+  const binding = resolveBinding(deps.env);
+  if (binding.bound && binding.alias === alias) {
+    deps.stderr(
+      `Warning: the current shell is bound to '${alias}'. It will keep pointing at a now-deleted configuration until it's rebound with 'ccp use'.`,
+    );
+  }
+
+  try {
+    await removeProfile(deps.stateDir, alias);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  try {
+    await deps.daemonPort.stopDaemon(record.configDir);
+  } catch (err) {
+    deps.stderr(`Warning: could not clean up the background daemon for '${alias}': ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  deps.stdout(`Removed Profile '${alias}'.`);
   return 0;
 }
 
