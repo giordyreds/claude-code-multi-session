@@ -19,6 +19,15 @@ function defaultStateDir(): string {
   return join(homedir(), ".ccacct");
 }
 
+/** The Default install's configuration directory — the source of the Rig shared into every
+ * newly added Profile (ADR-0007). Like the rest of this project's identity-resolution
+ * assumptions (ADR-0001, ADR-0005), this path is reverse-engineered rather than documented by
+ * Anthropic: it's where `claude` reads and writes when no `CLAUDE_CONFIG_DIR` override is in
+ * effect. */
+function defaultInstallDir(): string {
+  return join(homedir(), ".claude");
+}
+
 export interface RunCliOptions {
   /** The shell environment to resolve Binding from. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
@@ -33,6 +42,9 @@ export interface RunCliOptions {
   /** Test seam: the tool's own state directory, holding the Profile registry and every managed
    * Profile's isolated config directory. Defaults to `~/.ccacct`. */
   stateDir?: string;
+  /** Test seam: the Default install's configuration directory — the source of the Rig shared
+   * into every newly added Profile (ADR-0007). Defaults to `~/.claude`. */
+  installDir?: string;
 }
 
 /**
@@ -45,6 +57,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const stderr = options.stderr ?? ((line: string) => console.error(line));
   const claudePort = options.claudePort ?? new ClaudeCliPort();
   const stateDir = options.stateDir ?? defaultStateDir();
+  const installDir = options.installDir ?? defaultInstallDir();
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -55,11 +68,11 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     case "whoami":
       return runWhoami({ env, stdout, stderr, claudePort });
     case "add":
-      return runAdd({ alias: argv[1], stateDir, stdout, stderr });
+      return runAdd({ alias: argv[1], stateDir, installDir, stdout, stderr });
     case "ls":
       return runLs({ stateDir, stdout, stderr, claudePort });
     case "login":
-      return runLogin(argv.slice(1), { stateDir, stdout, stderr, claudePort });
+      return runLogin(argv.slice(1), { stateDir, installDir, stdout, stderr, claudePort });
     default:
       stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
       return 1;
@@ -114,6 +127,7 @@ async function runLogin(
   args: string[],
   deps: {
     stateDir: string;
+    installDir: string;
     stdout: (line: string) => void;
     stderr: (line: string) => void;
     claudePort: ClaudePort;
@@ -129,7 +143,7 @@ async function runLogin(
   try {
     const registry = await loadRegistry(deps.stateDir);
     const existing = registry.profiles[alias];
-    configDir = existing ? existing.configDir : (await addProfile(deps.stateDir, alias)).configDir;
+    configDir = existing ? existing.configDir : (await addProfile(deps.stateDir, alias, deps.installDir)).configDir;
   } catch (err) {
     return reportError(deps.stderr, err);
   }
@@ -190,6 +204,7 @@ function formatIdentity(alias: string, status: AuthStatus): string {
 async function runAdd(deps: {
   alias: string | undefined;
   stateDir: string;
+  installDir: string;
   stdout: (line: string) => void;
   stderr: (line: string) => void;
 }): Promise<number> {
@@ -200,7 +215,7 @@ async function runAdd(deps: {
   }
 
   try {
-    const result = await addProfile(deps.stateDir, alias);
+    const result = await addProfile(deps.stateDir, alias, deps.installDir);
     deps.stdout(`Created Profile '${result.alias}' at ${result.configDir}`);
     return 0;
   } catch (err) {
