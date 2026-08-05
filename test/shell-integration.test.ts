@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,11 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
  * that only ever happens correctly if stdout carries nothing but the export line. A fake
  * `claude` executable stands in for the real one (ADR-0005: this project never spawns it in
  * tests), driven by env vars this test controls per case.
+ *
+ * `CCACCT_HOME` points the real CLI's registry (ADR-0006) at a temp directory rather than a real
+ * `$HOME` (ADR-0007's amendment). Aliases are registered the same way a real user would, via
+ * `ccp add` against the real binary, rather than by hand-writing `registry.json` — this is the
+ * one test that can afford to exercise the full `add` → `use` path end to end.
  */
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -28,7 +33,6 @@ describe.skipIf(!zshAvailable)("ccp shell function (zsh integration)", () => {
   beforeEach(async () => {
     binDir = await mkdtemp(join(tmpdir(), "ccp-shell-bin-"));
     profilesRoot = await mkdtemp(join(tmpdir(), "ccp-shell-profiles-"));
-    await mkdir(join(profilesRoot, "work"));
 
     // A fake `claude` on PATH — never the real binary (see ADR-0005). Controlled per-test via
     // $FAKE_CLAUDE_RESPONSE; when that's empty, it derives a response from $CLAUDE_CONFIG_DIR's
@@ -79,6 +83,7 @@ describe.skipIf(!zshAvailable)("ccp shell function (zsh integration)", () => {
   it("binds CLAUDE_CONFIG_DIR in the parent shell, and leaves it usable afterwards, for a known logged-in Profile", () => {
     const { stdout, stderr, status } = runInZsh(
       `source ${JSON.stringify(join(repoRoot, "shell", "ccp.sh"))}
+       ccp add work >/dev/null
        ccp use work
        echo "STATUS:$?"
        echo "CONFIG_DIR:${"$"}{CLAUDE_CONFIG_DIR:-<unset>}"
@@ -89,13 +94,14 @@ describe.skipIf(!zshAvailable)("ccp shell function (zsh integration)", () => {
     expect(status).toBe(0);
     expect(stderr).toBe("");
     expect(stdout).toContain("STATUS:0");
-    expect(stdout).toContain(`CONFIG_DIR:${join(profilesRoot, "work")}`);
+    expect(stdout).toContain(`CONFIG_DIR:${join(profilesRoot, "profiles", "work")}`);
     expect(stdout).toContain("STILL_ALIVE");
   });
 
   it("still binds, with the logged-out warning appearing on stderr rather than being evaluated", () => {
     const { stdout, stderr, status } = runInZsh(
       `source ${JSON.stringify(join(repoRoot, "shell", "ccp.sh"))}
+       ccp add work >/dev/null
        ccp use work
        echo "STATUS:$?"
        echo "CONFIG_DIR:${"$"}{CLAUDE_CONFIG_DIR:-<unset>}"`,
@@ -104,7 +110,7 @@ describe.skipIf(!zshAvailable)("ccp shell function (zsh integration)", () => {
 
     expect(status).toBe(0);
     expect(stdout).toContain("STATUS:0");
-    expect(stdout).toContain(`CONFIG_DIR:${join(profilesRoot, "work")}`);
+    expect(stdout).toContain(`CONFIG_DIR:${join(profilesRoot, "profiles", "work")}`);
     expect(stderr).toMatch(/not logged in/i);
   });
 
@@ -125,21 +131,20 @@ describe.skipIf(!zshAvailable)("ccp shell function (zsh integration)", () => {
     expect(stderr).toMatch(/unknown alias 'ghost'/i);
   });
 
-  it("lets two shells bound to different Profiles each report their own Account and Organization, undisturbed by the other", async () => {
-    await mkdir(join(profilesRoot, "alpha"));
-    await mkdir(join(profilesRoot, "beta"));
-
+  it("lets two shells bound to different Profiles each report their own Account and Organization, undisturbed by the other", () => {
     // Two separate zsh processes — as close as a single test gets to "two shells at once" —
-    // each binding then immediately asking `ccp whoami`, the actual command CONTEXT.md's Binding
-    // is meant to serve.
+    // each adding then binding then immediately asking `ccp whoami`, the actual command
+    // CONTEXT.md's Binding is meant to serve.
     const alpha = runInZsh(
       `source ${JSON.stringify(join(repoRoot, "shell", "ccp.sh"))}
+       ccp add alpha >/dev/null
        ccp use alpha
        ccp whoami`,
       "",
     );
     const beta = runInZsh(
       `source ${JSON.stringify(join(repoRoot, "shell", "ccp.sh"))}
+       ccp add beta >/dev/null
        ccp use beta
        ccp whoami`,
       "",

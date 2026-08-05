@@ -1,8 +1,16 @@
 ---
-status: accepted
+status: superseded
 ---
 
 # `ccp use` resolves Aliases under `~/.ccacct`, and reads Expected identity from a file this ADR defines
+
+> **Superseded before merge.** #3 and #4 landed while this branch was in flight, with a registry
+> shape this ADR didn't anticipate (stored `configDir`, not a computed one — see ADR-0006's own
+> "Superseded, in part" section, filed for the identical situation on #4's branch). See the
+> amendment at the bottom for what `ccp use` actually does now. The numbering collision — this
+> file and ADR-0006 were both independently filed as "0006" by branches that each thought the
+> other hadn't landed — is resolved by renumbering this one to 0007, keeping 0006 for the one
+> that matches the ADR-0005 lineage it amends.
 
 Issue #5 (`ccp use <alias>`) is blocked by #4 (`ccp login`, which is blocked by #3, the Profile
 registry) for a concrete reason: knowing whether an Alias is *known*, and what identity it is
@@ -55,3 +63,34 @@ has a target to write to rather than inventing its own.
   tests by writing the expected-identity file directly, standing in for `ccp login`.
 - `CCACCT_HOME` is a new environment variable with no other purpose yet. If #3 introduces its
   own override mechanism, reconcile rather than keep two.
+
+## Amended, on merge, by #3 and #4 landing for real
+
+Both provisional contracts above are gone; `src/profile.ts` and `src/expected-identity.ts` are
+deleted. `ccp use <alias>` now does exactly what this ADR's own Consequences predicted:
+
+- **Alias resolution is a registry lookup.** `ccp use` calls `loadRegistry(stateDir)` (from
+  `src/registry.ts`, ADR-0006) and looks up `alias` there. "Unknown Alias" is now "no entry in
+  the registry" rather than "no directory on disk" — the config directory `ccp use` binds to is
+  the registry entry's own `configDir` field, never a freshly computed `<stateDir>/<alias>`.
+  Unlike `ccp login`, `ccp use` does **not** fall back to `addProfile` for an unregistered alias:
+  Binding never opens a browser or authenticates (this ticket's own acceptance criterion), and
+  silently originating a Profile from `use` would give it a second, undocumented way to come into
+  existence besides `ccp add`/`ccp login`.
+- **Expected identity comes from the same registry entry**, `record.expectedIdentity` — no
+  separate `.ccp/expected-identity.json` file, no separate read path to keep in sync. It's
+  `ExpectedIdentity` from `src/registry.ts` now, whose `email`/`orgName` are non-optional once
+  present (recording a partial identity was never possible — see `ccp login`'s own dedicated
+  failure case for a status missing either field), so Drift comparison no longer needs this
+  module's optional-field handling.
+- **`CCACCT_HOME` is kept**, exactly as this ADR's Consequences asked ("reconcile rather than keep
+  two") — but reconciled *into* `stateDir`, the one override mechanism #3/#4 actually built
+  (`RunCliOptions.stateDir`, threaded through every subcommand). `CCACCT_HOME` is now read once,
+  in `cli.ts`'s `defaultStateDir`, as that option's environment-variable fallback — the state
+  directory a `CCACCT_HOME` override points at holds `registry.json` and every Profile's
+  `profiles/<alias>` directory (ADR-0006), not a flat `<alias>` directory as originally specified
+  here. This is what lets `test/shell-integration.test.ts` bind the real, built CLI against a temp
+  directory without touching `$HOME`, exactly this ADR's original reason for introducing the
+  variable.
+- Drift is now reachable outside tests exactly as intended: `ccp login` records a real Expected
+  identity, `ccp use` reads it back from the same registry, no stand-in file required.
