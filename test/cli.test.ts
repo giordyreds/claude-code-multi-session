@@ -338,6 +338,7 @@ describe("runCli login", () => {
     expect(registry.profiles.work).toEqual({
       configDir: expectedConfigDir,
       expectedIdentity: { email: "work@example.com", orgName: "Work Org" },
+      drifted: false,
     });
   });
 
@@ -355,6 +356,7 @@ describe("runCli login", () => {
     expect(registry.profiles.work).toEqual({
       configDir,
       expectedIdentity: { email: "work@example.com", orgName: "Work Org" },
+      drifted: false,
     });
   });
 
@@ -447,5 +449,348 @@ describe("runCli login", () => {
       email: "me@example.com",
       orgName: "Personal Org",
     });
+  });
+});
+
+describe("runCli use", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-use-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("requires an alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["use"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+  });
+
+  it("fails without printing anything to stdout when the Alias is unknown", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+
+    const code = await runCli(["use", "ghost"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/unknown alias 'ghost'/i);
+  });
+
+  it("binds a known, non-drifted Profile: only an export statement reaches stdout", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR="${configDir}"`]);
+    expect(claudePort.calls).toEqual([configDir]);
+    // Never authenticates or opens a browser (CONTEXT.md's Binding, distinct from Login).
+    expect(claudePort.loginCalls).toEqual([]);
+  });
+
+  it("still binds a logged-out Profile, with the warning on stderr rather than stdout", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR="${configDir}"`]);
+    expect(stderr.join("\n")).toMatch(/not logged in/i);
+  });
+
+  it("still binds a drifted Profile, warning prominently on stderr and naming both identities", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    // Drift is a warning, never a block — Binding still succeeds.
+    expect(stdout).toEqual([`export CLAUDE_CONFIG_DIR="${configDir}"`]);
+    const report = stderr.join("\n");
+    expect(report).toMatch(/drift/i);
+    expect(report).toMatch(/work@example\.com/);
+    expect(report).toMatch(/Work Org/);
+    expect(report).toMatch(/someone-else@example\.com/);
+    expect(report).toMatch(/Other Org/);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.drifted).toBe(true);
+    // Reconciliation is the only thing allowed to change what's recorded as expected.
+    expect(registry.profiles.work?.expectedIdentity).toEqual({ email: "work@example.com", orgName: "Work Org" });
+  });
+
+  it("clears a previously recorded Drift once the observed identity matches again", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, email: "drifted@example.com", orgName: "Drifted Org" }),
+    });
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
+
+    const { stderr, stderrFn } = captureLines();
+    const code = await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: stderrFn,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(false);
+  });
+
+  it("leaves a previously recorded Drift untouched when the Profile is logged out — nothing was observed to disprove it", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, email: "drifted@example.com", orgName: "Drifted Org" }),
+    });
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
+
+    const { stderr, stderrFn } = captureLines();
+    const code = await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: stderrFn,
+      claudePort: fakeClaudePort({ loggedIn: false }),
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.join("\n")).toMatch(/not logged in/i);
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
+  });
+
+  it("sends a hard claude-port failure to stderr, never stdout, and exits 1", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = throwingClaudePort("spawn claude ENOENT");
+
+    const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/ENOENT/);
+  });
+});
+
+describe("runCli ls (Drift marking)", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-ls-drift-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("marks a drifted Profile distinctly, from stored state alone", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" }),
+    });
+
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+    // A ClaudePort that would throw if `ls` ever asked it about a managed Profile — only the
+    // Default install row may query it live.
+    const claudePort: ClaudePort = {
+      async login() {},
+      async authStatus(configDir?: string) {
+        if (configDir !== undefined) throw new Error(`ls must not live-check a managed Profile (${configDir})`);
+        return { loggedIn: false };
+      },
+    };
+
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    const report = stdout.join("\n");
+    expect(report).toMatch(/\bwork\b.*\[DRIFTED\]/i);
+  });
+
+  it("does not mark a Profile that has never drifted", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stdout.join("\n")).not.toMatch(/DRIFTED/i);
+  });
+});
+
+describe("runCli reconcile", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-cli-reconcile-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("requires an alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["reconcile"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/usage/i);
+  });
+
+  it("fails for an unknown Alias", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+
+    const code = await runCli(["reconcile", "ghost"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/ghost/i);
+  });
+
+  it("accepts the observed identity as the new Expected identity, without ever logging in", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" }),
+    });
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
+
+    const code = await runCli(["reconcile", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout.join("\n")).toMatch(/someone-else@example\.com/);
+    // Reconciliation reads identity the same way Drift detection does — it never re-authenticates.
+    expect(claudePort.loginCalls).toEqual([]);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toEqual({
+      email: "someone-else@example.com",
+      orgName: "Other Org",
+    });
+    expect(registry.profiles.work?.drifted).toBe(false);
+  });
+
+  it("refuses to reconcile a logged-out Profile — there is no observed identity to accept as truth", async () => {
+    await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
+
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: false });
+
+    const code = await runCli(["reconcile", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/not logged in/i);
+    expect(claudePort.loginCalls).toEqual([]);
+  });
+
+  it("never disturbs another Profile's recorded identity", async () => {
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    });
+    await runCli(["login", "personal"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, email: "me@example.com", orgName: "Personal Org" }),
+    });
+
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
+    const code = await runCli(["reconcile", "work"], { stateDir, stdout: () => {}, stderr: () => {}, claudePort });
+
+    expect(code).toBe(0);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.personal?.expectedIdentity).toEqual({ email: "me@example.com", orgName: "Personal Org" });
   });
 });

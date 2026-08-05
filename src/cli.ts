@@ -2,16 +2,28 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
-import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity } from "./registry.js";
+import { isDrifted } from "./drift.js";
+import {
+  addProfile,
+  DEFAULT_INSTALL_ALIAS,
+  loadRegistry,
+  recordDrift,
+  recordExpectedIdentity,
+  type ExpectedIdentity,
+  type ProfileRecord,
+} from "./registry.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami          Report the bound Profile's identity\n  add <alias>     Create a new Profile\n  ls              List every Profile\n  login <alias>   Authenticate a Profile and record its resulting identity";
+  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use <alias>        Bind the current shell to a Profile (via the `ccp` shell function)\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
+const USE_USAGE = "Usage: ccp use <alias>";
+const RECONCILE_USAGE = "Usage: ccp reconcile <alias>";
 
 const NOT_LOGGED_IN = "(not logged in)";
 const NEVER_LOGGED_IN = "(never logged in)";
 const UNKNOWN = "(unknown)";
+const DRIFTED_MARKER = "[DRIFTED]";
 
 /** The tool's own state directory: holds the Profile registry and every managed Profile's
  * isolated config directory. */
@@ -60,6 +72,10 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       return runLs({ stateDir, stdout, stderr, claudePort });
     case "login":
       return runLogin(argv.slice(1), { stateDir, stdout, stderr, claudePort });
+    case "use":
+      return runUse(argv[1], { stateDir, stdout, stderr, claudePort });
+    case "reconcile":
+      return runReconcile(argv[1], { stateDir, stdout, stderr, claudePort });
     default:
       stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
       return 1;
@@ -168,6 +184,155 @@ async function runLogin(
 }
 
 /**
+ * `ccp use <alias>`: Binding (CONTEXT.md), the `ccp` shell function's counterpart. Prints
+ * **only** `export CLAUDE_CONFIG_DIR=...` to stdout — per ADR-0004 that line is the one thing the
+ * shell function evaluates, so every diagnostic below goes to stderr instead, and a rejection
+ * (unknown Alias, or a hard {@link ClaudePort} failure) must print nothing to stdout at all,
+ * leaving the calling shell unmodified.
+ *
+ * Verifies the Profile's identity as part of Binding and reports a logged-out or drifted Profile
+ * on stderr (ticket #8's Drift detection) — but Binding still succeeds either way. Drift is a
+ * warning, never a block: the whole point is that the user finds out *before* running `claude`
+ * under the wrong identity, not that Binding refuses to happen.
+ */
+async function runUse(
+  alias: string | undefined,
+  deps: { stateDir: string; stdout: (line: string) => void; stderr: (line: string) => void; claudePort: ClaudePort },
+): Promise<number> {
+  if (!alias) {
+    deps.stderr(USE_USAGE);
+    return 1;
+  }
+
+  const record = await resolveKnownProfile(deps, alias);
+  if (!record) return 1;
+
+  let status: AuthStatus;
+  try {
+    status = await deps.claudePort.authStatus(record.configDir);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  await reportDriftAndUpdateRegistry(deps, alias, record, status);
+
+  deps.stdout(`export CLAUDE_CONFIG_DIR="${record.configDir}"`);
+  return 0;
+}
+
+/**
+ * Loads the registry and looks up `alias`'s entry, reporting an actionable error to stderr — and
+ * resolving `undefined` — when the registry can't be read or `alias` isn't registered. The one
+ * lookup `ccp use` and `ccp reconcile` share.
+ */
+async function resolveKnownProfile(
+  deps: { stateDir: string; stderr: (line: string) => void },
+  alias: string,
+): Promise<ProfileRecord | undefined> {
+  let registry;
+  try {
+    registry = await loadRegistry(deps.stateDir);
+  } catch (err) {
+    reportError(deps.stderr, err);
+    return undefined;
+  }
+
+  const record = registry.profiles[alias];
+  if (!record) {
+    deps.stderr(`Unknown Alias '${alias}': no Profile named '${alias}' is registered. Run 'ccp add ${alias}' first.`);
+    return undefined;
+  }
+
+  return record;
+}
+
+/**
+ * Warns on stderr about a logged-out or drifted Profile — the two states `ccp use` reports
+ * without ever blocking Binding — and persists the resulting Drift state (ticket #8) so `ccp ls`
+ * can mark it later from stored state alone, with no live check of its own.
+ *
+ * Only ever touches the stored `drifted` flag when this check actually had enough to compare —
+ * an Expected identity on record *and* a fully-reported observed identity. A Profile that's
+ * logged out, or one `claude` reports as logged in without email/orgName (permitted by
+ * {@link AuthStatus}'s shape — ADR-0005), leaves whatever Drift state was already recorded
+ * exactly as it was: there is nothing observed to prove it's still drifted, or to prove it isn't.
+ */
+async function reportDriftAndUpdateRegistry(
+  deps: { stateDir: string; stderr: (line: string) => void },
+  alias: string,
+  record: ProfileRecord,
+  status: AuthStatus,
+): Promise<void> {
+  if (!status.loggedIn) {
+    deps.stderr(`Warning: Profile '${alias}' is not logged in.`);
+    return;
+  }
+
+  const { expectedIdentity } = record;
+  const { email, orgName } = status;
+  if (!expectedIdentity || email === undefined || orgName === undefined) {
+    return;
+  }
+
+  const drifted = isDrifted(expectedIdentity, status);
+  if (drifted) {
+    // Prominent and names both identities, per ticket #8's acceptance criteria — this is the
+    // moment that catches "someone logged in directly while a shell was bound" before it bills
+    // the wrong Organization.
+    deps.stderr(`!!! DRIFT DETECTED for Profile '${alias}' !!!`);
+    deps.stderr(`  Expected identity: ${formatAccountAndOrg(expectedIdentity)}`);
+    deps.stderr(`  Observed identity: ${formatAccountAndOrg({ email, orgName })}`);
+    deps.stderr(`Binding '${alias}' anyway. Run 'ccp reconcile ${alias}' if the observed identity is now correct.`);
+  }
+
+  if (drifted !== record.drifted) {
+    await recordDrift(deps.stateDir, alias, drifted);
+  }
+}
+
+/**
+ * `ccp reconcile <alias>`: Reconciliation (CONTEXT.md) — accepts a Profile's currently observed
+ * identity as truth and records it as the new Expected identity, resolving Drift. Reads identity
+ * the exact same way Drift detection does, via {@link ClaudePort.authStatus}; never calls
+ * {@link ClaudePort.login}, so it can never re-authenticate or open a browser, per ticket #8's
+ * acceptance criteria.
+ */
+async function runReconcile(
+  alias: string | undefined,
+  deps: { stateDir: string; stdout: (line: string) => void; stderr: (line: string) => void; claudePort: ClaudePort },
+): Promise<number> {
+  if (!alias) {
+    deps.stderr(RECONCILE_USAGE);
+    return 1;
+  }
+
+  const record = await resolveKnownProfile(deps, alias);
+  if (!record) return 1;
+
+  let status: AuthStatus;
+  try {
+    status = await deps.claudePort.authStatus(record.configDir);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  if (!status.loggedIn) {
+    deps.stderr(`Cannot reconcile '${alias}': it is not logged in, so there is no observed identity to accept as truth.`);
+    return 1;
+  }
+  if (status.email === undefined || status.orgName === undefined) {
+    deps.stderr(`Cannot reconcile '${alias}': claude did not report an Account email or Organization.`);
+    return 1;
+  }
+
+  const identity: ExpectedIdentity = { email: status.email, orgName: status.orgName };
+  await recordExpectedIdentity(deps.stateDir, alias, identity);
+
+  deps.stdout(`Reconciled '${alias}': Expected identity is now ${formatAccountAndOrg(identity)}.`);
+  return 0;
+}
+
+/**
  * Renders an identity report shared by `whoami` and `login`. Account/Organization fall back to
  * an explicit `(not logged in)` — a Profile can be Bound but not logged in (CONTEXT.md's Login)
  * — rather than ever printing a blank. A logged-in status missing its email/orgName (permitted
@@ -214,6 +379,11 @@ async function runAdd(deps: {
  * create), followed by the Default install's row. Per ADR-0003, that row is never migrated or
  * mutated and must show its real, live identity rather than a blank — the whole reason `ccp ls`
  * exists is to stop the expensive account from being used by accident.
+ *
+ * A managed Profile's row also marks Drift (ticket #8) distinctly when the registry's stored
+ * `drifted` flag — set the last time `ccp use` checked it — is `true`. This never triggers its
+ * own {@link ClaudePort.authStatus} call per Profile: the reported state is stored identity,
+ * presented honestly as such, not a live re-check that a token still works.
  */
 async function runLs(deps: {
   stateDir: string;
@@ -232,7 +402,8 @@ async function runLs(deps: {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([alias, record]) => {
       const identity = record.expectedIdentity ? formatAccountAndOrg(record.expectedIdentity) : NEVER_LOGGED_IN;
-      return `${alias}: ${identity}`;
+      const driftMarker = record.drifted ? ` ${DRIFTED_MARKER}` : "";
+      return `${alias}: ${identity}${driftMarker}`;
     });
 
   let defaultStatus: AuthStatus;

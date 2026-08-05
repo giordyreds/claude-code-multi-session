@@ -3,7 +3,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity, saveRegistry } from "../src/registry.js";
+import {
+  addProfile,
+  DEFAULT_INSTALL_ALIAS,
+  loadRegistry,
+  recordDrift,
+  recordExpectedIdentity,
+  saveRegistry,
+} from "../src/registry.js";
 
 describe("loadRegistry", () => {
   let stateDir: string;
@@ -23,10 +30,11 @@ describe("loadRegistry", () => {
   it("round-trips a saved registry", async () => {
     const registry = {
       profiles: {
-        work: { configDir: join(stateDir, "profiles", "work"), expectedIdentity: null },
+        work: { configDir: join(stateDir, "profiles", "work"), expectedIdentity: null, drifted: false },
         personal: {
           configDir: join(stateDir, "profiles", "personal"),
           expectedIdentity: { email: "dev@example.com", orgName: "Acme Corp" },
+          drifted: true,
         },
       },
     };
@@ -34,6 +42,29 @@ describe("loadRegistry", () => {
     await saveRegistry(stateDir, registry);
 
     await expect(loadRegistry(stateDir)).resolves.toEqual(registry);
+  });
+
+  it("defaults 'drifted' to false when a registry file predates ticket #8's field", async () => {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, "registry.json"),
+      JSON.stringify({ profiles: { work: { configDir: "/x", expectedIdentity: null } } }),
+      "utf8",
+    );
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.drifted).toBe(false);
+  });
+
+  it("throws an actionable error when a profile entry has a non-boolean 'drifted'", async () => {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(
+      join(stateDir, "registry.json"),
+      JSON.stringify({ profiles: { work: { configDir: "/x", expectedIdentity: null, drifted: "yes" } } }),
+      "utf8",
+    );
+
+    await expect(loadRegistry(stateDir)).rejects.toThrow(/work/);
   });
 
   it("throws an actionable error rather than resetting when the registry file isn't valid JSON", async () => {
@@ -101,7 +132,7 @@ describe("addProfile", () => {
     expect(dirStat.isDirectory()).toBe(true);
 
     const registry = await loadRegistry(stateDir);
-    expect(registry.profiles.work).toEqual({ configDir: result.configDir, expectedIdentity: null });
+    expect(registry.profiles.work).toEqual({ configDir: result.configDir, expectedIdentity: null, drifted: false });
   });
 
   it("gives two Profiles distinct config directories", async () => {
@@ -172,7 +203,18 @@ describe("recordExpectedIdentity", () => {
     expect(registry.profiles.work).toEqual({
       configDir,
       expectedIdentity: { email: "dev@example.com", orgName: "Acme Corp" },
+      drifted: false,
     });
+  });
+
+  it("clears a previously recorded Drift, since a fresh Expected identity is the new baseline", async () => {
+    await addProfile(stateDir, "work");
+    await recordDrift(stateDir, "work", true);
+
+    await recordExpectedIdentity(stateDir, "work", { email: "dev@example.com", orgName: "Acme Corp" });
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.drifted).toBe(false);
   });
 
   it("leaves every other alias's recorded identity intact when one alias is (re-)recorded", async () => {
@@ -201,6 +243,58 @@ describe("recordExpectedIdentity", () => {
     await expect(
       recordExpectedIdentity(stateDir, "ghost", { email: "dev@example.com", orgName: "Acme Corp" }),
     ).rejects.toThrow(/ghost/);
+
+    await expect(loadRegistry(stateDir)).resolves.toEqual({ profiles: {} });
+  });
+});
+
+describe("recordDrift", () => {
+  let stateDir: string;
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), "ccp-registry-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  it("records Drift without disturbing configDir or expectedIdentity", async () => {
+    const { configDir } = await addProfile(stateDir, "work");
+    await recordExpectedIdentity(stateDir, "work", { email: "dev@example.com", orgName: "Acme Corp" });
+
+    await recordDrift(stateDir, "work", true);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work).toEqual({
+      configDir,
+      expectedIdentity: { email: "dev@example.com", orgName: "Acme Corp" },
+      drifted: true,
+    });
+  });
+
+  it("can clear a previously recorded Drift", async () => {
+    await addProfile(stateDir, "work");
+    await recordDrift(stateDir, "work", true);
+
+    await recordDrift(stateDir, "work", false);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.drifted).toBe(false);
+  });
+
+  it("leaves every other alias's Drift state intact", async () => {
+    await addProfile(stateDir, "work");
+    await addProfile(stateDir, "personal");
+
+    await recordDrift(stateDir, "work", true);
+
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.personal?.drifted).toBe(false);
+  });
+
+  it("throws an actionable error rather than fabricating an entry for an alias that was never added", async () => {
+    await expect(recordDrift(stateDir, "ghost", true)).rejects.toThrow(/ghost/);
 
     await expect(loadRegistry(stateDir)).resolves.toEqual({ profiles: {} });
   });
