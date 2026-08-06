@@ -69,12 +69,23 @@ A typical setup:
 ccp add work        # create a Profile
 ccp login work       # authenticate it (opens a browser)
 ccp use work         # bind the current shell to it
+claude               # first launch only: still runs Claude Code's own onboarding
+                     # wizard (login-method screen, another browser tab) even
+                     # though `ccp login` already authenticated it — see below
 ccp whoami           # confirm which identity you're running as
 ```
 
 `ccp use` with no Alias opens an interactive picker. `ccp run work -- git push`
 runs one command under a Profile without binding the shell at all, so it works from
 scripts and non-interactive shells that never sourced `shell/ccp.sh`.
+
+**A new Profile's first interactive `claude` launch always re-runs Claude Code's
+onboarding wizard**, once, regardless of `ccp login` having already authenticated
+it — the two are separate gates Claude Code tracks independently (see
+[ADR-0008](./docs/adr/0008-onboarding-is-a-separate-one-time-gate-from-login.md)).
+Click through it once per Profile, right after `ccp login`, before scripting
+against that Profile or relying on it from a non-interactive shell. Every launch
+after the first goes straight into a normal session.
 
 ## Scope
 
