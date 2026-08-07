@@ -493,6 +493,80 @@ describe("runCli login", () => {
     expect(registry.profiles.work?.expectedIdentity).toBeNull();
   });
 
+  it("pre-seeds the Profile's onboarding state from the Default install after a successful login", async () => {
+    // Its own scratch dir, deliberately separate from `installDir` — the real Default install's
+    // `.claude.json` is a sibling of `~/.claude`, not nested inside it (src/cli.ts's
+    // `defaultInstallStateFilePath`), and this fixture mirrors that shape rather than implying a
+    // nesting relationship that doesn't exist.
+    const installStateScratchDir = await mkdtemp(join(tmpdir(), "ccp-cli-login-install-state-"));
+    const installStateFilePath = join(installStateScratchDir, ".claude.json");
+    await writeFile(
+      installStateFilePath,
+      JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.221" }),
+      "utf8",
+    );
+    const configDir = join(stateDir, "profiles", "work");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, ".claude.json"), JSON.stringify({ oauthAccount: {} }), "utf8");
+
+    try {
+      const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+      const code = await runCli(["login", "work"], {
+        env: {},
+        stdout: () => {},
+        stderr: () => {},
+        claudePort,
+        stateDir,
+        installDir,
+        installStateFilePath,
+      });
+
+      expect(code).toBe(0);
+      const seeded = JSON.parse(await readFile(join(configDir, ".claude.json"), "utf8"));
+      expect(seeded).toEqual({ oauthAccount: {}, hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.221" });
+    } finally {
+      await rm(installStateScratchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never calls the onboarding seeder when the login flow itself fails", async () => {
+    const claudePort = fakeClaudePort({ loggedIn: false }, { loginError: "user closed the browser" });
+    const seederCalls: Array<[string, string]> = [];
+    const onboardingSeeder = async (installStateFilePathArg: string, configDirArg: string) => {
+      seederCalls.push([installStateFilePathArg, configDirArg]);
+      return { seeded: false };
+    };
+
+    const code = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort, stateDir, installDir, onboardingSeeder });
+
+    expect(code).toBe(1);
+    expect(seederCalls).toEqual([]);
+  });
+
+  it("warns but still succeeds when the onboarding pre-seed fails unexpectedly", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const onboardingSeeder = async () => {
+      throw new Error("disk full");
+    };
+
+    const code = await runCli(["login", "work"], {
+      env: {},
+      stdout: stdoutFn,
+      stderr: stderrFn,
+      claudePort,
+      stateDir,
+      installDir,
+      onboardingSeeder,
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.join("\n")).toMatch(/onboarding.*disk full/i);
+    expect(stdout.join("\n")).toMatch(/work@example\.com/);
+    const registry = await loadRegistry(stateDir);
+    expect(registry.profiles.work?.expectedIdentity).toEqual({ email: "work@example.com", orgName: "Work Org" });
+  });
+
   it("logging in one Profile leaves every other Profile's recorded identity intact", async () => {
     // Real registry file under a real temp stateDir (no fake) — only the unavoidable, unautomatable
     // part (the actual `claude auth login` browser flow) is faked. This is the isolation

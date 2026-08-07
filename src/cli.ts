@@ -5,6 +5,7 @@ import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.j
 import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
 import { ProcessDaemonPort, type DaemonPort } from "./daemon.js";
 import { isDrifted } from "./drift.js";
+import { seedOnboardingState, type OnboardingSeeder } from "./onboarding.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
 import {
   addProfile,
@@ -63,6 +64,16 @@ function defaultInstallDir(): string {
   return join(homedir(), ".claude");
 }
 
+/** Where the Default install's own `.claude.json` lives — confirmed by probe (ADR-0008's
+ * amendment) to be the literal home-directory root, a *sibling* of {@link defaultInstallDir}'s
+ * `~/.claude`, never nested inside it. Onboarding state (`hasCompletedOnboarding`,
+ * `lastOnboardingVersion`) lives in this file, not under `~/.claude/`, for the unbound Default
+ * install specifically — a bound Profile's own copy, by contrast, lives inside its
+ * `CLAUDE_CONFIG_DIR` (see {@link seedOnboardingState}'s doc comment). */
+function defaultInstallStateFilePath(): string {
+  return join(homedir(), ".claude.json");
+}
+
 export interface RunCliOptions {
   /** The shell environment to resolve Binding from. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
@@ -80,6 +91,10 @@ export interface RunCliOptions {
   /** Test seam: the Default install's configuration directory — the source of the Rig shared
    * into every newly added Profile (ADR-0007). Defaults to `~/.claude`. */
   installDir?: string;
+  /** Test seam: the Default install's own `.claude.json` — a *file* path, and a sibling of
+   * `installDir` rather than something inside it (see {@link defaultInstallStateFilePath}).
+   * Source for `ccp login`'s onboarding pre-seed (issue #27). Defaults to `~/.claude.json`. */
+  installStateFilePath?: string;
   /** Test seam: replaces `ccp rm`'s best-effort daemon cleanup (ADR-0001) so tests never depend
    * on real OS processes. Defaults to a real {@link ProcessDaemonPort}. */
   daemonPort?: DaemonPort;
@@ -95,6 +110,12 @@ export interface RunCliOptions {
    * inherits stdio.
    */
   commandRunner?: CommandRunner;
+  /**
+   * Test seam: replaces `ccp login`'s best-effort onboarding pre-seed attempt (issue #27), so
+   * tests can exercise its "warn, never fail Login" behaviour without depending on real
+   * filesystem permission errors. Defaults to the real {@link seedOnboardingState}.
+   */
+  onboardingSeeder?: OnboardingSeeder;
 }
 
 /** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
@@ -121,9 +142,11 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const claudePort = options.claudePort ?? new ClaudeCliPort();
   const stateDir = options.stateDir ?? defaultStateDir(env);
   const installDir = options.installDir ?? defaultInstallDir();
+  const installStateFilePath = options.installStateFilePath ?? defaultInstallStateFilePath();
   const daemonPort = options.daemonPort ?? new ProcessDaemonPort();
   const picker = options.picker ?? new TtyPicker();
   const commandRunner = options.commandRunner ?? runCommand;
+  const onboardingSeeder = options.onboardingSeeder ?? seedOnboardingState;
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -140,7 +163,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     case "ls":
       return runLs(deps);
     case "login":
-      return runLogin(argv.slice(1), { stateDir, installDir, stdout, stderr, claudePort });
+      return runLogin(argv.slice(1), { stateDir, installDir, installStateFilePath, stdout, stderr, claudePort, onboardingSeeder });
     case "use":
       return runUse(argv[1], deps);
     case "run":
@@ -199,15 +222,23 @@ function errorMessage(err: unknown): string {
  * entry is provisioned by `addProfile` on the spot, so `ccp login` still works standalone. An
  * alias `ccp add` already created is reused as-is, so logging in never disturbs a Profile's
  * existing (and possibly already-populated) registry entry beyond its Expected identity.
+ *
+ * Also attempts to pre-seed the Profile's onboarding state (issue #27, ADR-0008's amendment) right
+ * after `login` succeeds, so the Profile's first *interactive* `claude` launch skips the one-time
+ * onboarding wizard instead of requiring it as a separate manual step. Best-effort: a failure here
+ * only ever warns, never fails `ccp login` itself, since {@link seedOnboardingState} touches
+ * Claude Code's own undocumented state file rather than anything this tool owns.
  */
 async function runLogin(
   args: string[],
   deps: {
     stateDir: string;
     installDir: string;
+    installStateFilePath: string;
     stdout: (line: string) => void;
     stderr: (line: string) => void;
     claudePort: ClaudePort;
+    onboardingSeeder: OnboardingSeeder;
   },
 ): Promise<number> {
   const alias = args[0];
@@ -229,6 +260,12 @@ async function runLogin(
     await deps.claudePort.login(configDir);
   } catch (err) {
     return reportError(deps.stderr, err);
+  }
+
+  try {
+    await deps.onboardingSeeder(deps.installStateFilePath, configDir);
+  } catch (err) {
+    deps.stderr(`Warning: could not pre-seed onboarding state for '${alias}': ${errorMessage(err)}`);
   }
 
   let status: AuthStatus;

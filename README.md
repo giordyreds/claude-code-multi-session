@@ -69,9 +69,7 @@ A typical setup:
 ccp add work        # create a Profile
 ccp login work       # authenticate it (opens a browser)
 ccp use work         # bind the current shell to it
-claude               # first launch only: still runs Claude Code's own onboarding
-                     # wizard (login-method screen, another browser tab) even
-                     # though `ccp login` already authenticated it — see below
+claude               # usually drops straight into a normal session (see below)
 ccp whoami           # confirm which identity you're running as
 ```
 
@@ -79,13 +77,19 @@ ccp whoami           # confirm which identity you're running as
 runs one command under a Profile without binding the shell at all, so it works from
 scripts and non-interactive shells that never sourced `shell/ccp.sh`.
 
-**A new Profile's first interactive `claude` launch always re-runs Claude Code's
-onboarding wizard**, once, regardless of `ccp login` having already authenticated
-it — the two are separate gates Claude Code tracks independently (see
+**A new Profile's first interactive `claude` launch is a separate gate from
+`ccp login`** — Claude Code tracks onboarding completion independently of
+authentication (see
 [ADR-0008](./docs/adr/0008-onboarding-is-a-separate-one-time-gate-from-login.md)).
-Click through it once per Profile, right after `ccp login`, before scripting
-against that Profile or relying on it from a non-interactive shell. Every launch
-after the first goes straight into a normal session.
+`ccp login` closes this gate too, automatically, whenever your Default install
+(`~/.claude.json`) has itself already completed onboarding — the ordinary case
+once you've used `claude` interactively at all on this machine. When it can't
+(e.g. a machine where even the Default install has never run `claude`
+interactively), the Profile falls back to the one-time manual step this always
+used to require: click through the onboarding wizard once, right after
+`ccp login`, before scripting against that Profile or relying on it from a
+non-interactive shell. Every launch after the first goes straight into a normal
+session either way.
 
 ## Scope
 
