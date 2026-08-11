@@ -1140,6 +1140,7 @@ describe("runCli doctor", () => {
   let legacyStateDir: string;
   let zshrcPath: string;
   let installStateFilePath: string;
+  let fakeClaudeBinDir: string;
 
   beforeEach(async () => {
     stateDir = join(await mkdtemp(join(tmpdir(), "ccp-cli-doctor-test-")), "ccp");
@@ -1148,17 +1149,28 @@ describe("runCli doctor", () => {
     legacyStateDir = join(scratch, "ccacct");
     zshrcPath = join(scratch, ".zshrc");
     installStateFilePath = join(scratch, ".claude.json");
+
+    // "claude on PATH" (src/doctor.ts) only ever checks the executable bit, never spawns it (see
+    // its own doc comment), so an empty file is enough to stand in for the real `claude` — same
+    // spirit as ADR-0005's fake ClaudePort, applied to this one Check that reads env.PATH
+    // directly instead of going through an injected port. Without this, whether "every Check
+    // comes back clean" depends on the ambient machine actually having Claude Code installed,
+    // which is true on a developer's Mac but not on a CI runner.
+    fakeClaudeBinDir = await mkdtemp(join(tmpdir(), "ccp-cli-doctor-claude-bin-"));
+    await writeFile(join(fakeClaudeBinDir, "claude"), "", { mode: 0o755 });
   });
 
   afterEach(async () => {
     await rm(stateDir, { recursive: true, force: true });
     await rm(installDir, { recursive: true, force: true });
     await rm(legacyStateDir, { recursive: true, force: true });
+    await rm(fakeClaudeBinDir, { recursive: true, force: true });
   });
 
   function runDoctor(claudePort: ClaudePort = fakeClaudePort({ loggedIn: false })) {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     return runCli(["doctor"], {
+      env: { PATH: fakeClaudeBinDir },
       stateDir,
       installDir,
       installStateFilePath,
