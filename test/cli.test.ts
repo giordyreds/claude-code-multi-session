@@ -136,6 +136,19 @@ describe("runCli", () => {
     expect(stdout).toEqual([]);
     expect(stderr.join("\n")).toMatch(/unknown command 'destroy'/i);
   });
+
+  it("prints shell/ccp.sh's exact contents to stdout and nothing else on shell-init", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const script = await readFile(new URL("../shell/ccp.sh", import.meta.url), "utf8");
+
+    const code = await runCli(["shell-init"], { stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    // Bare — shell/ccp.sh stays the single source of truth (ADR-0004's Amendment 1); this reads
+    // and prints it rather than duplicating its text into the program.
+    expect(stdout).toEqual([script]);
+    expect(stderr).toEqual([]);
+  });
 });
 
 describe("runCli whoami", () => {

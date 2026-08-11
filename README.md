@@ -32,15 +32,23 @@ npm install
 npm run build
 ```
 
-Put `dist/bin.js` on your `PATH` (e.g. `npm link`, or symlink it as `ccp`), then source
-the shell function in your `.zshrc`:
+Put `dist/bin.js` on your `PATH` (e.g. `npm link`, or symlink it as `ccp`), then add this
+line to your `.zshrc`:
 
 ```sh
-source /path/to/claude-code-multi-session/shell/ccp.sh
+if command -v ccp >/dev/null 2>&1; then eval "$(command ccp shell-init)"; fi
 ```
 
-Sourcing it also adds a `[alias]` segment to your prompt showing which Profile the shell
-is bound to (`[(default)]` when unbound) — see `shell/ccp.sh` for how it hooks `PS1`.
+This evaluates the `ccp` shell function `ccp shell-init` prints, rather than `source`-ing
+`shell/ccp.sh` by an absolute path — a path that, under a Node version manager, is scoped
+per Node version and can silently vanish on the next upgrade (see
+[ADR-0004](./docs/adr/0004-shell-function-not-tui.md)'s Amendment 1). The line above works
+unchanged on every machine and survives Node upgrades, and is a no-op — no output, exit
+status 0 — if the package is ever removed, since it's guarded on `ccp` actually being on
+`PATH`.
+
+This also adds a `[alias]` segment to your prompt showing which Profile the shell is
+bound to (`[(default)]` when unbound) — see `shell/ccp.sh` for how it hooks `PS1`.
 
 ## Usage
 
@@ -54,6 +62,7 @@ Commands:
   login <alias>      Authenticate a Profile and record its resulting identity
   use [alias]        Bind the current shell to a Profile; with no Alias, shows an
                      interactive picker
+  shell-init         Emit the `ccp` shell function, for a shell startup file to `eval`
   run <alias>        Run a command under a Profile's identity, no shell function
                      required — usage: ccp run <alias> -- <command>
   reconcile <alias>  Accept a drifted Profile's observed identity as its new

@@ -20,10 +20,11 @@ import {
 } from "./registry.js";
 import { repairRig } from "./rig.js";
 import { renderSettings } from "./settings.js";
+import { shellInitScript } from "./shell-init.js";
 import { packageVersion } from "./version.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history\n\nFlags:\n  --version          Print ccp's own version\n  --help             Print this usage text";
+  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  shell-init         Emit the `ccp` shell function, for a shell startup file to `eval`\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history\n\nFlags:\n  --version          Print ccp's own version\n  --help             Print this usage text";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
 const RUN_USAGE = "Usage: ccp run <alias> -- <command> [args...]";
@@ -178,6 +179,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       return runLogin(argv.slice(1), { stateDir, installDir, installStateFilePath, stdout, stderr, claudePort, onboardingSeeder });
     case "use":
       return runUse(argv[1], deps);
+    case "shell-init":
+      return runShellInit(deps);
     case "run":
       return runRun(argv.slice(1), deps);
     case "reconcile":
@@ -370,6 +373,31 @@ async function runUse(aliasArg: string | undefined, deps: CliDeps): Promise<numb
  * an Alias like `foo"; rm -rf ~ #` break out of the `export` line the `ccp` shell function evals. */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * `ccp shell-init`: prints the `ccp` shell function's source (`shell/ccp.sh`) on stdout and
+ * nothing else, so a shell startup file can `eval` it instead of `source`-ing the file by an
+ * absolute path that a Node version manager can silently move out from under it (ADR-0004's
+ * Amendment 1, issue #32). `shell/ccp.sh` stays the single source of truth — {@link
+ * shellInitScript} reads and returns it rather than this file duplicating its text — so the two
+ * can never drift apart.
+ *
+ * Same stdout discipline ADR-0004 already requires of `ccp use`: this output is `eval`'d too, at
+ * the start of every interactive shell, so a diagnostic reaching stdout here would be evaluated as
+ * code exactly like a stray warning on `ccp use`'s stdout would be. The one failure mode —
+ * `shell/ccp.sh` missing or unreadable — goes to stderr instead.
+ */
+async function runShellInit(deps: { stdout: (line: string) => void; stderr: (line: string) => void }): Promise<number> {
+  let script: string;
+  try {
+    script = await shellInitScript();
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  deps.stdout(script);
+  return 0;
 }
 
 /**

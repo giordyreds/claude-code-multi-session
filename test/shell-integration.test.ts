@@ -153,6 +153,48 @@ describe.skipIf(!zshAvailable)("ccp shell function (zsh integration)", () => {
     expect(stderr).toMatch(/interactive terminal/i);
   });
 
+  it("binds CLAUDE_CONFIG_DIR in the parent shell when the shell function is eval'd from `ccp shell-init` instead of sourced by path", () => {
+    // The documented startup line (issue #32): guarded on the command's presence, `command ccp`
+    // (not bare `ccp`) so this never recurses into a shell function that isn't defined yet.
+    // Otherwise identical to the first test above, but evaluating `ccp shell-init`'s stdout in
+    // place of `source shell/ccp.sh` is exactly the substitution ADR-0004's Amendment 1 makes: the
+    // same Binding behaviour must survive it unchanged.
+    const { stdout, stderr, status } = runInZsh(
+      `if command -v ccp >/dev/null 2>&1; then eval "$(command ccp shell-init)"; fi
+       ccp add work >/dev/null
+       ccp use work
+       echo "STATUS:$?"
+       echo "CONFIG_DIR:${"$"}{CLAUDE_CONFIG_DIR:-<unset>}"
+       echo STILL_ALIVE`,
+      JSON.stringify({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+    );
+
+    expect(status).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("STATUS:0");
+    expect(stdout).toContain(`CONFIG_DIR:${join(profilesRoot, "profiles", "work")}`);
+    expect(stdout).toContain("STILL_ALIVE");
+  });
+
+  it("produces no output and a zero status from the guarded startup line when `ccp` is absent from PATH", () => {
+    // The line issue #32 documents is guarded on the command's presence, so removing the package
+    // leaves a harmless no-op at shell start rather than an error on every new shell. This runs it
+    // against a PATH with no `ccp` (and no fake `claude`) on it at all — the real "package
+    // removed" shape, not a simulation. The `if`/`fi` form (rather than a plain `&&`) is what
+    // makes the guard's own exit status zero when the condition is false, per this test's own
+    // acceptance criterion — a bare `command -v ccp && eval ...` would leave the line's status at
+    // `command -v`'s own failure instead.
+    const result = spawnSync(
+      "zsh",
+      ["-f", "-c", 'if command -v ccp >/dev/null 2>&1; then eval "$(command ccp shell-init)"; fi'],
+      { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
   it("lets two shells bound to different Profiles each report their own Account and Organization, undisturbed by the other", () => {
     // Two separate zsh processes — as close as a single test gets to "two shells at once" —
     // each adding then binding then immediately asking `ccp whoami`, the actual command
