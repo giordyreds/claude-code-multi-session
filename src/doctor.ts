@@ -1,9 +1,10 @@
 import { constants } from "node:fs";
-import { access, readdir, readFile, stat } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
-import type { ClaudePort } from "./claude-port.js";
+import type { AuthStatus, ClaudePort } from "./claude-port.js";
 import { isErrnoException } from "./fs-utils.js";
 import { onboardingSourceReady } from "./onboarding.js";
+import { loadRegistry, type ExpectedIdentity } from "./registry.js";
 import { RIG_ITEMS } from "./rig.js";
 
 /**
@@ -19,11 +20,23 @@ export const SHELL_WIRING_LINE = 'if command -v ccp >/dev/null 2>&1; then eval "
  * migration (CONTEXT.md's Setup). */
 export const LEGACY_STATE_DIR_NAME = ".ccacct";
 
-/** One Check's outcome (CONTEXT.md's **Check**): the Contract it verified, by name, and what it
- * found. `ccp doctor` (ticket #33) reports every Check through this shape. */
+/** One Check's outcome (CONTEXT.md's **Check**): the Contract it verified, by name, what it
+ * found, and whether it found a problem. `ccp doctor` (ticket #33) reports every Check through
+ * this shape; `runDoctor` (`src/cli.ts`, issue #34) also reads `ok` across every report to decide
+ * whether this run actually verified anything worth recording as a Claude Code version — see
+ * {@link recordVerifiedVersion}'s doc comment. */
 export interface CheckReport {
   contract: string;
   finding: string;
+  ok: boolean;
+}
+
+/** What one Check function itself resolves, before {@link guarded} turns it into a
+ * {@link CheckReport} — kept private since nothing outside this module needs a finding without
+ * its Contract name attached. */
+interface CheckOutcome {
+  finding: string;
+  ok: boolean;
 }
 
 /**
@@ -48,9 +61,10 @@ export interface DoctorContext {
 }
 
 /**
- * Runs every Check that costs no per-Profile process spawn — ticket #33's scope; the identity
- * Checks, which spawn one process per Profile to compare each against its Expected identity,
- * follow in a later ticket — and resolves each one's {@link CheckReport}.
+ * Runs every Check `ccp doctor` reports, including the identity Check (issue #34) that spawns one
+ * process per registered Profile to compare its observed identity against its Expected identity —
+ * the only Check with that cost, which is exactly why it lives here and never on the Binding path
+ * (ADR-0010, `src/binding.ts`) — and resolves each one's {@link CheckReport}.
  *
  * Every Check is independent, and none of them can take the rest of the run down: an unexpected
  * error inside one is caught and turned into that Check's own finding (`guarded` below), the same
@@ -59,7 +73,16 @@ export interface DoctorContext {
  * Reports only. Like every Check in this project, it never repairs anything — that stays with
  * `ccp sync` (CONTEXT.md's Check) — and it never writes to disk: every filesystem call here is a
  * read (`stat`, `readdir`, `readFile`) or a permission probe (`access`), never a write, a
- * `mkdir`, or a `rm`.
+ * `mkdir`, or a `rm`. Recording the Claude Code version this run last saw (ADR-0010's "honest
+ * replacement for a matrix") is therefore deliberately kept out of this function — it's the one
+ * genuine write in `ccp doctor`'s path, and it happens in `runDoctor` (`src/cli.ts`) instead, via
+ * {@link recordVerifiedVersion}, so this function's own "never writes to disk" stays true and
+ * directly tested (see `doctor.test.ts`) rather than merely assumed.
+ *
+ * Each {@link CheckReport}'s `ok` reports whether that one Check found a problem — `runDoctor`
+ * reads it across every report to decide whether *this run* actually passed, i.e. whether the
+ * version it just saw is honestly one this machine has verified (issue #34's "the version its
+ * Checks last **passed** against", not merely "ran against").
  */
 export async function runDoctorChecks(ctx: DoctorContext): Promise<CheckReport[]> {
   return [
@@ -71,14 +94,16 @@ export async function runDoctorChecks(ctx: DoctorContext): Promise<CheckReport[]
     await guarded("State directory", () => checkStateDirWritable(ctx.stateDir)),
     await guarded("Legacy state directory", () => checkLegacyStateDir(ctx.legacyStateDir, ctx.stateDir)),
     await guarded("Shell wiring", () => checkShellWiring(ctx.zshrcPath)),
+    await guarded("Identity isolation", () => checkIdentityIsolation(ctx.stateDir, ctx.claudePort)),
   ];
 }
 
-async function guarded(contract: string, run: () => Promise<string>): Promise<CheckReport> {
+async function guarded(contract: string, run: () => Promise<CheckOutcome>): Promise<CheckReport> {
   try {
-    return { contract, finding: await run() };
+    const { finding, ok } = await run();
+    return { contract, finding, ok };
   } catch (err) {
-    return { contract, finding: `could not be checked: ${errorMessage(err)}` };
+    return { contract, finding: `could not be checked: ${errorMessage(err)}`, ok: false };
   }
 }
 
@@ -90,13 +115,13 @@ const CLAUDE_EXECUTABLE = "claude";
  * this Check costs nothing even if it's run often. `PATH` is `:`-delimited, matching this
  * project's platform scope (CONTEXT.md's Out of Scope: macOS/zsh only).
  */
-async function checkClaudeOnPath(env: NodeJS.ProcessEnv): Promise<string> {
+async function checkClaudeOnPath(env: NodeJS.ProcessEnv): Promise<CheckOutcome> {
   const dirs = (env.PATH ?? "").split(delimiter).filter((dir) => dir.length > 0);
 
   for (const dir of dirs) {
     try {
       await access(join(dir, CLAUDE_EXECUTABLE), constants.X_OK);
-      return "found on PATH";
+      return { finding: "found on PATH", ok: true };
     } catch {
       // Deliberately broad, unlike isDirectory/readFileOrEmpty below: this is a multi-candidate
       // scan across every PATH entry, not a single path's existence check, so one directory
@@ -105,25 +130,46 @@ async function checkClaudeOnPath(env: NodeJS.ProcessEnv): Promise<string> {
     }
   }
 
-  return "not found on PATH — install Claude Code, or add its location to PATH, before relying on ccp";
+  return {
+    finding: "not found on PATH — install Claude Code, or add its location to PATH, before relying on ccp",
+    ok: false,
+  };
 }
 
-/** Reports the version {@link ClaudePort.version} resolves, or the failure to resolve one — never
- * throws, so a `claude` that's missing or produces something unexpected shows up as this Check's
- * own finding rather than aborting the rest of the report. */
-async function checkClaudeVersion(claudePort: ClaudePort): Promise<string> {
+/** Either the Claude Code version {@link ClaudePort.version} resolved, or the failure to resolve
+ * one — shared by {@link checkClaudeVersion} (which formats it into a finding) and `runDoctor`
+ * (`src/cli.ts`, which needs the raw version itself to record it — see
+ * {@link recordVerifiedVersion}) so both read `claude --version` through the exact same call
+ * rather than one of them re-deriving success from the other's already-formatted string. */
+export type ClaudeVersionResolution = { ok: true; version: string } | { ok: false; error: string };
+
+/** Resolves `claude --version` through {@link ClaudePort.version} — never throws. */
+export async function resolveClaudeVersion(claudePort: ClaudePort): Promise<ClaudeVersionResolution> {
   try {
-    return await claudePort.version();
+    return { ok: true, version: await claudePort.version() };
   } catch (err) {
-    return `could not be determined: ${errorMessage(err)}`;
+    return { ok: false, error: errorMessage(err) };
   }
 }
 
-async function checkDefaultInstall(installDir: string): Promise<string> {
+/** Reports the version {@link resolveClaudeVersion} resolves, or the failure to resolve one —
+ * never throws, so a `claude` that's missing or produces something unexpected shows up as this
+ * Check's own finding rather than aborting the rest of the report. */
+async function checkClaudeVersion(claudePort: ClaudePort): Promise<CheckOutcome> {
+  const result = await resolveClaudeVersion(claudePort);
+  return result.ok
+    ? { finding: result.version, ok: true }
+    : { finding: `could not be determined: ${result.error}`, ok: false };
+}
+
+async function checkDefaultInstall(installDir: string): Promise<CheckOutcome> {
   const present = await isDirectory(installDir);
   return present
-    ? `found at ${installDir}`
-    : `not found at ${installDir} — an absent Default install means an empty Rig and no onboarding pre-seeding`;
+    ? { finding: `found at ${installDir}`, ok: true }
+    : {
+        finding: `not found at ${installDir} — an absent Default install means an empty Rig and no onboarding pre-seeding`,
+        ok: false,
+      };
 }
 
 const KNOWN_RIG_ITEMS = new Set<string>(RIG_ITEMS);
@@ -135,27 +181,30 @@ const KNOWN_RIG_ITEMS = new Set<string>(RIG_ITEMS);
  * that's absent from the Default install is ordinary, already-established behaviour (Spike 0001,
  * ADR-0007's `shareRig`/`repairRig`) and is never named here.
  */
-async function checkRig(installDir: string): Promise<string> {
+async function checkRig(installDir: string): Promise<CheckOutcome> {
   let entries: string[];
   try {
     entries = await readdir(installDir);
   } catch (err) {
     if (!isErrnoException(err) || err.code !== "ENOENT") throw err;
-    return "skipped — the Default install is absent";
+    // The Default install's own absence is already named by "Default install"'s own Check —
+    // this Check found nothing unrecognised itself, so it's not this Check's own problem to
+    // report a second time.
+    return { finding: "skipped — the Default install is absent", ok: true };
   }
 
   const unrecognised = entries.filter((entry) => !KNOWN_RIG_ITEMS.has(entry)).sort((a, b) => a.localeCompare(b));
 
   return unrecognised.length === 0
-    ? "every top-level entry under the Default install is a known Rig item"
-    : `unrecognised top-level entries under the Default install: ${unrecognised.join(", ")}`;
+    ? { finding: "every top-level entry under the Default install is a known Rig item", ok: true }
+    : { finding: `unrecognised top-level entries under the Default install: ${unrecognised.join(", ")}`, ok: false };
 }
 
-async function checkOnboardingPreseed(installStateFilePath: string): Promise<string> {
+async function checkOnboardingPreseed(installStateFilePath: string): Promise<CheckOutcome> {
   const ready = await onboardingSourceReady(installStateFilePath);
   return ready
-    ? "would currently work — the Default install has completed onboarding"
-    : "would not currently work — the Default install hasn't completed onboarding itself yet";
+    ? { finding: "would currently work — the Default install has completed onboarding", ok: true }
+    : { finding: "would not currently work — the Default install hasn't completed onboarding itself yet", ok: false };
 }
 
 /**
@@ -166,21 +215,27 @@ async function checkOnboardingPreseed(installStateFilePath: string): Promise<str
  * probing its parent directory instead — the permission that actually decides whether creating it
  * later would succeed.
  */
-async function checkStateDirWritable(stateDir: string): Promise<string> {
+async function checkStateDirWritable(stateDir: string): Promise<CheckOutcome> {
   try {
     await access(stateDir, constants.W_OK);
-    return `writable (${stateDir})`;
+    return { finding: `writable (${stateDir})`, ok: true };
   } catch (err) {
     if (!isErrnoException(err) || err.code !== "ENOENT") {
-      return `not writable at ${stateDir}: ${errorMessage(err)}`;
+      return { finding: `not writable at ${stateDir}: ${errorMessage(err)}`, ok: false };
     }
   }
 
   try {
     await access(dirname(stateDir), constants.W_OK);
-    return `does not exist yet at ${stateDir}, but its parent directory is writable — it will be created on first use`;
+    return {
+      finding: `does not exist yet at ${stateDir}, but its parent directory is writable — it will be created on first use`,
+      ok: true,
+    };
   } catch (err) {
-    return `does not exist yet at ${stateDir}, and its parent directory is not writable: ${errorMessage(err)}`;
+    return {
+      finding: `does not exist yet at ${stateDir}, and its parent directory is not writable: ${errorMessage(err)}`,
+      ok: false,
+    };
   }
 }
 
@@ -189,11 +244,14 @@ async function checkStateDirWritable(stateDir: string): Promise<string> {
  * command that resolves it — detection only, never moving anything itself, so the rename can
  * never silently orphan a Profile registry someone hasn't moved yet.
  */
-async function checkLegacyStateDir(legacyStateDir: string, currentStateDir: string): Promise<string> {
+async function checkLegacyStateDir(legacyStateDir: string, currentStateDir: string): Promise<CheckOutcome> {
   const present = await isDirectory(legacyStateDir);
   return present
-    ? `found at ${legacyStateDir}, from before the rename (issue #31) — resolve it with: mv ${legacyStateDir} ${currentStateDir}`
-    : "none found";
+    ? {
+        finding: `found at ${legacyStateDir}, from before the rename (issue #31) — resolve it with: mv ${legacyStateDir} ${currentStateDir}`,
+        ok: false,
+      }
+    : { finding: "none found", ok: true };
 }
 
 /**
@@ -206,12 +264,12 @@ async function checkLegacyStateDir(legacyStateDir: string, currentStateDir: stri
  * `runDoctorChecks`'s `guarded` wrapper turns a rethrown error into this Check's own
  * "could not be checked" finding, so nothing here can take the rest of the report down.
  */
-async function checkShellWiring(zshrcPath: string): Promise<string> {
+async function checkShellWiring(zshrcPath: string): Promise<CheckOutcome> {
   const content = await readFileOrEmpty(zshrcPath);
 
   return content.includes(SHELL_WIRING_LINE)
-    ? `present in ${zshrcPath}`
-    : `missing from ${zshrcPath} — add this line:\n  ${SHELL_WIRING_LINE}`;
+    ? { finding: `present in ${zshrcPath}`, ok: true }
+    : { finding: `missing from ${zshrcPath} — add this line:\n  ${SHELL_WIRING_LINE}`, ok: false };
 }
 
 async function readFileOrEmpty(path: string): Promise<string> {
@@ -221,6 +279,101 @@ async function readFileOrEmpty(path: string): Promise<string> {
     if (isErrnoException(err) && err.code === "ENOENT") return "";
     throw err;
   }
+}
+
+/**
+ * The identity Check (issue #34) — the only Check that spawns a process per Profile (ADR-0010),
+ * which is why it lives here and never on the Binding path. Resolves every registered Profile's
+ * observed identity, in parallel, and looks for the one pattern that actually indicates lost
+ * isolation: two or more Profiles that are recorded with *different* Expected identities but
+ * currently resolve to the exact *same* observed identity as each other. The config-directory
+ * variable was supposed to keep them apart (CONTEXT.md's Contract #3, ADR-0010); if it no longer
+ * does, every Profile sharing its neighbour's identity is named.
+ *
+ * Judging by mere sameness — "do these two Profiles currently match?" — would be wrong on its own
+ * (ADR-0010's Consequences): two Profiles legitimately sharing one Account, both still matching
+ * their own recorded Expected identity, must never be reported. That case is a group whose members
+ * all share one *observed* identity but also all share the same *Expected* identity, so it's
+ * distinguished from real isolation loss by requiring the Expected identities within a group to
+ * disagree too, not merely the observed ones to coincide.
+ *
+ * A Profile with no recorded Expected identity yet, or one that isn't currently logged in with
+ * both an email and an orgName, has nothing to compare — the same posture `drift.ts`'s `isDrifted`
+ * already takes toward a single Profile — so it's left out of every group entirely rather than
+ * counted as a match or a mismatch.
+ */
+async function checkIdentityIsolation(stateDir: string, claudePort: ClaudePort): Promise<CheckOutcome> {
+  const { profiles } = await loadRegistry(stateDir);
+  const aliases = Object.keys(profiles).sort((a, b) => a.localeCompare(b));
+
+  const comparable = (
+    await Promise.all(
+      aliases.map(async (alias) => {
+        const record = profiles[alias]!;
+        if (!record.expectedIdentity) return undefined;
+
+        const status = await claudePort.authStatus(record.configDir);
+        const observed = observedIdentity(status);
+        if (!observed) return undefined;
+
+        return { alias, expected: record.expectedIdentity, observed };
+      }),
+    )
+  ).filter((entry): entry is { alias: string; expected: ExpectedIdentity; observed: ExpectedIdentity } => entry !== undefined);
+
+  if (comparable.length === 0) {
+    return {
+      finding: "no Profile has both a recorded Expected identity and a currently resolvable observed identity to compare",
+      ok: true,
+    };
+  }
+
+  const byObserved = new Map<string, typeof comparable>();
+  for (const entry of comparable) {
+    const key = identityKey(entry.observed);
+    const group = byObserved.get(key);
+    if (group) group.push(entry);
+    else byObserved.set(key, [entry]);
+  }
+
+  const warnings: string[] = [];
+  for (const group of byObserved.values()) {
+    if (group.length < 2) continue;
+
+    const expectedKeys = new Set(group.map((entry) => identityKey(entry.expected)));
+    // Every member shares one observed identity; if their Expected identities agree too, this is
+    // Profiles legitimately sharing one Account on purpose — not the pattern this Check exists to
+    // catch (the false-positive case tested explicitly, per issue #34's acceptance criteria).
+    if (expectedKeys.size <= 1) continue;
+
+    const names = group.map((entry) => `'${entry.alias}' (expected ${formatIdentity(entry.expected)})`).join(", ");
+    warnings.push(`${names} all currently resolve to ${formatIdentity(group[0]!.observed)} — isolation may be lost`);
+  }
+
+  return warnings.length === 0
+    ? { finding: `no signs of lost isolation across ${comparable.length} comparable Profile(s)`, ok: true }
+    : { finding: warnings.join("; "), ok: false };
+}
+
+/** The (Account, Organization) `status` reports, or `undefined` when there isn't a full pair to
+ * compare — a Profile that's logged out, or one `claude` reports as logged in without both
+ * `email` and `orgName` (permitted by {@link AuthStatus}'s shape — ADR-0005). */
+function observedIdentity(status: AuthStatus): ExpectedIdentity | undefined {
+  if (!status.loggedIn || status.email === undefined || status.orgName === undefined) return undefined;
+  return { email: status.email, orgName: status.orgName };
+}
+
+/** A stable key for grouping (Account, Organization) pairs — same shape `drift.ts` compares field
+ * by field, just collapsed into one comparable string. */
+function identityKey(identity: ExpectedIdentity): string {
+  return JSON.stringify([identity.email, identity.orgName]);
+}
+
+/** Renders an (Account, Organization) pair for a Check finding — same shape `src/cli.ts`'s
+ * `formatAccountAndOrg` renders it in command output, kept as its own copy here since doctor.ts
+ * has no dependency on cli.ts. */
+function formatIdentity(identity: ExpectedIdentity): string {
+  return `${identity.email} (${identity.orgName})`;
 }
 
 /**
@@ -241,4 +394,57 @@ async function isDirectory(path: string): Promise<boolean> {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** The file `ccp doctor` records the Claude Code version its Checks last ran against — a small,
+ * dedicated state file under the tool's own state directory, deliberately separate from
+ * `registry.json` (`registry.ts`): this records what a run of `ccp doctor` last saw on this
+ * machine, nothing about any one Profile. */
+const VERIFIED_VERSION_FILE_NAME = "verified-version.json";
+
+function verifiedVersionPath(stateDir: string): string {
+  return join(stateDir, VERIFIED_VERSION_FILE_NAME);
+}
+
+/**
+ * Reads the Claude Code version `ccp doctor` last recorded on this machine (ADR-0010) — `null` if
+ * it has never recorded one, or if the record can't be read for any reason. A corrupt or missing
+ * record is never worth failing `ccp doctor` over: the worst consequence of treating it as `null`
+ * is reporting "never recorded" one run too many, which {@link recordVerifiedVersion} then
+ * overwrites with a fresh, valid record on this same run.
+ */
+export async function loadVerifiedVersion(stateDir: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await readFile(verifiedVersionPath(stateDir), "utf8");
+  } catch {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return isPlainObject(parsed) && typeof parsed.version === "string" ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Records `version` as the Claude Code version `ccp doctor`'s Checks last **passed** against —
+ * the "honest replacement for a matrix" ADR-0010 calls for: an account of what was actually
+ * verified on this machine, in place of a table of untested combinations. `runDoctor` (`src/
+ * cli.ts`) only calls this when every {@link CheckReport} from the same run reports `ok`, so a run
+ * that finds a real problem — lost isolation chief among them — never gets recorded as a version
+ * this machine has verified; it falls back to whatever was last actually clean instead (issue
+ * #34's "last **passed** against", not merely "last ran against"). The one deliberate write in
+ * `ccp doctor`'s path (see {@link runDoctorChecks}'s doc comment) — called only from `runDoctor`,
+ * never from here.
+ */
+export async function recordVerifiedVersion(stateDir: string, version: string): Promise<void> {
+  await mkdir(stateDir, { recursive: true });
+  await writeFile(verifiedVersionPath(stateDir), `${JSON.stringify({ version }, null, 2)}\n`, "utf8");
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

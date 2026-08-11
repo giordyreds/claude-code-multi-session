@@ -184,19 +184,30 @@ function withConfigDir(configDir?: string): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * Named in every error thrown below when `claude auth status --json`'s output no longer parses
+ * the way this project assumes (CONTEXT.md's Contract): Anthropic never documented this shape and
+ * owes us nothing (ADR-0010), so the most likely explanation for a sudden parse failure is that
+ * Claude Code itself changed underneath this tool, not that this one invocation glitched. Points
+ * at `ccp doctor` rather than leaving a bare parse error to guess at, since that's the command
+ * built to say what's actually still true on this machine (issue #34).
+ */
+const CONTRACT_CHANGED_HINT =
+  "Claude Code may have changed how it reports identity. Run 'ccp doctor' to see what still holds on this machine.";
+
 function toAuthStatus(result: ProcessResult): AuthStatus {
   let parsed: unknown;
   try {
     parsed = JSON.parse(result.stdout);
   } catch {
     throw new Error(
-      `'${CLAUDE_COMMAND} auth status --json' produced unparseable output: ${summarize(result)}`,
+      `'${CLAUDE_COMMAND} auth status --json' produced unparseable output: ${summarize(result)}. ${CONTRACT_CHANGED_HINT}`,
     );
   }
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || !("loggedIn" in parsed)) {
     throw new Error(
-      `'${CLAUDE_COMMAND} auth status --json' produced unexpected output: ${JSON.stringify(parsed)}`,
+      `'${CLAUDE_COMMAND} auth status --json' produced unexpected output: ${JSON.stringify(parsed)}. ${CONTRACT_CHANGED_HINT}`,
     );
   }
 

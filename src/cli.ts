@@ -4,7 +4,7 @@ import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
 import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
 import { ProcessDaemonPort, type DaemonPort } from "./daemon.js";
-import { LEGACY_STATE_DIR_NAME, runDoctorChecks } from "./doctor.js";
+import { LEGACY_STATE_DIR_NAME, loadVerifiedVersion, recordVerifiedVersion, resolveClaudeVersion, runDoctorChecks } from "./doctor.js";
 import { isDrifted } from "./drift.js";
 import { seedOnboardingState, type OnboardingSeeder } from "./onboarding.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
@@ -879,12 +879,21 @@ async function syncProfile(alias: string, record: ProfileRecord, installDir: str
 }
 
 /**
- * `ccp doctor` (ticket #33): runs every Check that costs no per-Profile process spawn — the
- * identity Checks, which spawn one process per Profile to compare it against its Expected
- * identity, follow in a later ticket — and reports each Contract by name alongside what it found
- * (CONTEXT.md's Check). Reports only: like every Check in this project, it never repairs anything
- * — that stays with `ccp sync` — and it never writes anything to disk, which is asserted directly
- * by this command's own tests rather than assumed from {@link runDoctorChecks} being read-only.
+ * `ccp doctor` (ticket #33, issue #34): runs every Check — including the identity Check, the only
+ * one that spawns a process per Profile (ADR-0010) — and reports each Contract by name alongside
+ * what it found (CONTEXT.md's Check). Reports only: like every Check in this project, it never
+ * repairs anything — that stays with `ccp sync`.
+ *
+ * The one deliberate exception to "never writes anything to disk" is this function itself, not
+ * {@link runDoctorChecks} (still read-only, still asserted directly by its own tests): once every
+ * Check has run, if every single one of them reports `ok` — nothing found on the machine that
+ * indicates a Contract broke, isolation included — it records the Claude Code version this run
+ * saw as the version its Checks last *passed* against (ADR-0010's "honest replacement for a
+ * matrix") via {@link recordVerifiedVersion}. A run that finds even one real problem never
+ * overwrites that record — it falls back to whatever was last actually recorded clean, or to
+ * "never recorded" if nothing has been — so "Verified against" always names a version this
+ * machine actually passed its Checks against, never merely the version it happened to be running
+ * during a broken run.
  */
 async function runDoctor(deps: {
   env: NodeJS.ProcessEnv;
@@ -898,6 +907,20 @@ async function runDoctor(deps: {
   stderr: (line: string) => void;
 }): Promise<number> {
   const reports = await runDoctorChecks(deps);
-  deps.stdout(reports.map((report) => `${report.contract}: ${report.finding}`).join("\n"));
+  const allChecksClean = reports.every((report) => report.ok);
+
+  const versionResolution = await resolveClaudeVersion(deps.claudePort);
+  let verifiedVersion: string | null;
+  if (versionResolution.ok && allChecksClean) {
+    await recordVerifiedVersion(deps.stateDir, versionResolution.version);
+    verifiedVersion = versionResolution.version;
+  } else {
+    verifiedVersion = await loadVerifiedVersion(deps.stateDir);
+  }
+
+  const lines = reports.map((report) => `${report.contract}: ${report.finding}`);
+  lines.push(`Verified against: ${verifiedVersion ?? "no version has ever been recorded on this machine"}`);
+
+  deps.stdout(lines.join("\n"));
   return 0;
 }

@@ -2,8 +2,9 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ClaudePort } from "../src/claude-port.js";
+import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
 import { LEGACY_STATE_DIR_NAME, runDoctorChecks, SHELL_WIRING_LINE, type DoctorContext } from "../src/doctor.js";
+import { addProfile, recordExpectedIdentity } from "../src/registry.js";
 
 function fakeClaudePort(version: string | Error = "2.1.224 (Claude Code)"): ClaudePort {
   return {
@@ -14,6 +15,25 @@ function fakeClaudePort(version: string | Error = "2.1.224 (Claude Code)"): Clau
     async version() {
       if (version instanceof Error) throw version;
       return version;
+    },
+  };
+}
+
+/**
+ * A {@link ClaudePort} whose `authStatus` answers per `configDir` from `byConfigDir`, defaulting
+ * to logged-out for anything unlisted — the "faked port returning controlled identities" issue
+ * #34's acceptance criteria calls for, driven through {@link runDoctorChecks}'s existing
+ * `claudePort` seam rather than any identity-Check-specific entry point.
+ */
+function fakeClaudePortByConfigDir(byConfigDir: Record<string, AuthStatus>): ClaudePort {
+  return {
+    async login() {},
+    async authStatus(configDir?: string) {
+      if (configDir !== undefined && configDir in byConfigDir) return byConfigDir[configDir]!;
+      return { loggedIn: false };
+    },
+    async version() {
+      return "2.1.224 (Claude Code)";
     },
   };
 }
@@ -73,6 +93,7 @@ describe("runDoctorChecks", () => {
       "State directory",
       "Legacy state directory",
       "Shell wiring",
+      "Identity isolation",
     ]);
   });
 
@@ -111,7 +132,7 @@ describe("runDoctorChecks", () => {
 
       expect(await findReport(reports, "Claude Code version")).toMatch(/could not be determined.*ENOENT/i);
       // Every other Check still ran.
-      expect(reports).toHaveLength(8);
+      expect(reports).toHaveLength(9);
     });
   });
 
@@ -273,6 +294,86 @@ describe("runDoctorChecks", () => {
       const reports = await runDoctorChecks(context({ zshrcPath: join(notADir, "child") }));
 
       expect(await findReport(reports, "Shell wiring")).toMatch(/could not be checked/i);
+    });
+  });
+
+  describe("Identity isolation", () => {
+    it("reports nothing to compare when no Profile has both an Expected identity and a resolvable observed one", async () => {
+      const reports = await runDoctorChecks(context());
+
+      expect(await findReport(reports, "Identity isolation")).toMatch(/no profile has both/i);
+    });
+
+    it("stays silent when every comparable Profile's observed identity matches its own Expected identity", async () => {
+      const { configDir: workDir } = await addProfile(stateDir, "work", installDir);
+      await recordExpectedIdentity(stateDir, "work", { email: "work@example.com", orgName: "Work Org" });
+      const { configDir: personalDir } = await addProfile(stateDir, "personal", installDir);
+      await recordExpectedIdentity(stateDir, "personal", { email: "personal@example.com", orgName: "Personal Org" });
+
+      const claudePort = fakeClaudePortByConfigDir({
+        [workDir]: { loggedIn: true, email: "work@example.com", orgName: "Work Org" },
+        [personalDir]: { loggedIn: true, email: "personal@example.com", orgName: "Personal Org" },
+      });
+
+      const reports = await runDoctorChecks(context({ claudePort }));
+
+      expect(await findReport(reports, "Identity isolation")).toMatch(/no signs of lost isolation/i);
+    });
+
+    it("warns when two Profiles expected to differ currently resolve to the same observed identity — the pattern that indicates lost isolation", async () => {
+      const { configDir: workDir } = await addProfile(stateDir, "work", installDir);
+      await recordExpectedIdentity(stateDir, "work", { email: "work@example.com", orgName: "Work Org" });
+      const { configDir: personalDir } = await addProfile(stateDir, "personal", installDir);
+      await recordExpectedIdentity(stateDir, "personal", { email: "personal@example.com", orgName: "Personal Org" });
+
+      // Both Profiles now observe 'work@example.com' — as if the config-directory variable
+      // stopped isolating 'personal' from 'work' entirely.
+      const claudePort = fakeClaudePortByConfigDir({
+        [workDir]: { loggedIn: true, email: "work@example.com", orgName: "Work Org" },
+        [personalDir]: { loggedIn: true, email: "work@example.com", orgName: "Work Org" },
+      });
+
+      const reports = await runDoctorChecks(context({ claudePort }));
+
+      const finding = await findReport(reports, "Identity isolation");
+      expect(finding).toMatch(/isolation may be lost/i);
+      expect(finding).toContain("'work'");
+      expect(finding).toContain("'personal'");
+      expect(finding).toMatch(/work@example\.com/);
+    });
+
+    it("does not warn when two Profiles legitimately resolve to the same Account and both match their Expected identity — the false-positive case", async () => {
+      const { configDir: workDir } = await addProfile(stateDir, "work", installDir);
+      await recordExpectedIdentity(stateDir, "work", { email: "shared@example.com", orgName: "Shared Org" });
+      const { configDir: ciDir } = await addProfile(stateDir, "ci", installDir);
+      await recordExpectedIdentity(stateDir, "ci", { email: "shared@example.com", orgName: "Shared Org" });
+
+      // Both Profiles are recorded as expecting the same Account on purpose, and both currently
+      // match it — never the pattern this Check exists to catch.
+      const claudePort = fakeClaudePortByConfigDir({
+        [workDir]: { loggedIn: true, email: "shared@example.com", orgName: "Shared Org" },
+        [ciDir]: { loggedIn: true, email: "shared@example.com", orgName: "Shared Org" },
+      });
+
+      const reports = await runDoctorChecks(context({ claudePort }));
+
+      expect(await findReport(reports, "Identity isolation")).toMatch(/no signs of lost isolation/i);
+    });
+
+    it("excludes a Profile with no recorded Expected identity yet from the comparison entirely", async () => {
+      const { configDir: workDir } = await addProfile(stateDir, "work", installDir);
+      await recordExpectedIdentity(stateDir, "work", { email: "work@example.com", orgName: "Work Org" });
+      // 'fresh' was just added and has never logged in — no Expected identity on record yet.
+      const { configDir: freshDir } = await addProfile(stateDir, "fresh", installDir);
+
+      const claudePort = fakeClaudePortByConfigDir({
+        [workDir]: { loggedIn: true, email: "work@example.com", orgName: "Work Org" },
+        [freshDir]: { loggedIn: false },
+      });
+
+      const reports = await runDoctorChecks(context({ claudePort }));
+
+      expect(await findReport(reports, "Identity isolation")).toMatch(/no signs of lost isolation/i);
     });
   });
 

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -679,6 +679,35 @@ describe("runCli use", () => {
     expect(claudePort.loginCalls).toEqual([]);
   });
 
+  it("spawns claude exactly once, asserted directly rather than assumed — never once per registered Profile (issue #34)", async () => {
+    const installDir = await mkdtemp(join(tmpdir(), "ccp-cli-use-spawn-count-install-"));
+    try {
+      await runCli(["login", "work"], {
+        env: {},
+        stdout: () => {},
+        stderr: () => {},
+        stateDir,
+        installDir,
+        claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      });
+      // Two more registered Profiles besides the one being bound — the identity isolation Check
+      // (`ccp doctor`, never `ccp use`) is the only Check allowed to spawn once per Profile; this
+      // asserts Binding itself never does, regardless of how many Profiles are registered.
+      await addProfile(stateDir, "personal", installDir);
+      await addProfile(stateDir, "side-project", installDir);
+      const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
+
+      const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+
+      const code = await runCli(["use", "work"], { stateDir, stdout: () => {}, stderr: () => {}, claudePort });
+
+      expect(code).toBe(0);
+      expect(claudePort.calls).toEqual([configDir]);
+    } finally {
+      await rm(installDir, { recursive: true, force: true });
+    }
+  });
+
   it("still binds a logged-out Profile, with the warning on stderr rather than stdout", async () => {
     await runCli(["add", "work"], { stateDir, stdout: () => {}, stderr: () => {} });
     const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
@@ -1156,6 +1185,8 @@ describe("runCli doctor", () => {
       "State directory",
       "Legacy state directory",
       "Shell wiring",
+      "Identity isolation",
+      "Verified against",
     ]) {
       expect(report).toContain(`${contract}:`);
     }
@@ -1165,6 +1196,86 @@ describe("runCli doctor", () => {
     const { stdout } = await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
 
     expect(stdout.join("\n")).toMatch(/Claude Code version: 2\.1\.224 \(Claude Code\)/);
+  });
+
+  describe("Verified against (issue #34)", () => {
+    const failingPort: ClaudePort = {
+      async login() {},
+      async authStatus() {
+        return { loggedIn: false };
+      },
+      async version() {
+        throw new Error("spawn claude ENOENT");
+      },
+    };
+
+    /** Makes every other Check report `ok` — this describe block's own beforeEach already leaves
+     * "Onboarding pre-seeding" and "Shell wiring" reporting a problem, and a version is only ever
+     * recorded (per issue #34's "last **passed** against", not merely "ran against") on a run
+     * where every Check comes back clean. */
+    async function makeEveryOtherCheckClean(): Promise<void> {
+      await writeFile(installStateFilePath, JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "1.0.0" }), "utf8");
+      await writeFile(zshrcPath, `# .zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
+    }
+
+    it("records and reports the version once every Check comes back clean", async () => {
+      await makeEveryOtherCheckClean();
+
+      const { stdout } = await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
+
+      expect(stdout.join("\n")).toContain("Verified against: 2.1.224 (Claude Code)");
+    });
+
+    it("never records a version from a run where a Check found a real problem — Onboarding pre-seeding and Shell wiring are unresolved by default here", async () => {
+      const { stdout } = await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
+
+      expect(stdout.join("\n")).toContain("Verified against: no version has ever been recorded on this machine");
+    });
+
+    it("never overwrites a clean record with a version from a later run that found a problem", async () => {
+      await makeEveryOtherCheckClean();
+      await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
+
+      // Shell wiring now regresses (as if someone edited the .zshrc back out) — a real problem on
+      // this later run — even though the version itself is unchanged.
+      await writeFile(zshrcPath, "# .zshrc\n", "utf8");
+      const { stdout } = await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
+
+      expect(stdout.join("\n")).toContain("Shell wiring: missing");
+      expect(stdout.join("\n")).toContain("Verified against: 2.1.224 (Claude Code)");
+    });
+
+    it("reports the previously recorded version when this run can't resolve a current one, rather than losing the record", async () => {
+      await makeEveryOtherCheckClean();
+      await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
+
+      const { stdout } = await runDoctor(failingPort);
+
+      expect(stdout.join("\n")).toContain("Verified against: 2.1.224 (Claude Code)");
+    });
+
+    it("reports that nothing has ever been recorded when a version has never been resolved on this machine", async () => {
+      const { stdout } = await runDoctor(failingPort);
+
+      expect(stdout.join("\n")).toContain("Verified against: no version has ever been recorded on this machine");
+    });
+
+    it("updates the record when the version changes between clean runs", async () => {
+      await makeEveryOtherCheckClean();
+      await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
+
+      const { stdout } = await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.2.0 (Claude Code)" }));
+
+      expect(stdout.join("\n")).toContain("Verified against: 2.2.0 (Claude Code)");
+    });
+
+    it("writes exactly the recorded-version file once every Check comes back clean, and nothing more", async () => {
+      await makeEveryOtherCheckClean();
+
+      await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
+
+      await expect(readdir(stateDir)).resolves.toEqual(["verified-version.json"]);
+    });
   });
 
   it("detects a state directory under the pre-rename name and prints the single move command that resolves it", async () => {
@@ -1193,9 +1304,11 @@ describe("runCli doctor", () => {
     expect(stdout.join("\n")).toContain(`Shell wiring: present in ${zshrcPath}`);
   });
 
-  it("writes nothing at all, asserted directly rather than assumed", async () => {
+  it("writes nothing at all when a Check found a real problem, since there is nothing clean to record (issue #34)", async () => {
     // Populate every path doctor reads from, so every Check's "found" branch runs too, not just
-    // the absent-state defaults which trivially write nothing.
+    // the absent-state defaults which trivially write nothing — but leave three of them dirty
+    // (an unrecognised Rig entry, a legacy state directory, missing Shell wiring), so this run
+    // never qualifies to record a version (see the "Verified against" describe block above).
     await mkdir(join(installDir, "skills"));
     await writeFile(join(installDir, "unknown-thing"), "x", "utf8");
     const installState = JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "1.0.0" });
@@ -1207,7 +1320,9 @@ describe("runCli doctor", () => {
     const { code } = await runDoctor();
 
     expect(code).toBe(0);
-    // The state directory, never created ahead of time, still doesn't exist.
+    // The state directory, never created ahead of time, still doesn't exist — nothing was ever
+    // recorded (asserted separately: the "Verified against" block above covers the one case where
+    // it is written to).
     await expect(stat(stateDir)).rejects.toThrow();
     // Neither file doctor only ever reads was modified.
     await expect(readFile(installStateFilePath, "utf8")).resolves.toBe(installState);

@@ -123,6 +123,22 @@ describe("ClaudeCliPort.authStatus", () => {
     await expect(port.authStatus()).rejects.toThrow(/unexpected/i);
   });
 
+  it("names Claude Code having changed and points at 'ccp doctor' when stdout isn't parseable JSON (issue #34)", async () => {
+    const port = new ClaudeCliPort({
+      run: fakeRun({ stdout: "not json", stderr: "", exitCode: 1 }),
+    });
+
+    await expect(port.authStatus()).rejects.toThrow(/claude code.*changed.*ccp doctor/is);
+  });
+
+  it("names Claude Code having changed and points at 'ccp doctor' when the JSON is missing 'loggedIn' (issue #34)", async () => {
+    const port = new ClaudeCliPort({
+      run: fakeRun({ stdout: '{"unexpected": true}', stderr: "", exitCode: 0 }),
+    });
+
+    await expect(port.authStatus()).rejects.toThrow(/claude code.*changed.*ccp doctor/is);
+  });
+
   it("propagates a process-runner rejection (e.g. the claude binary is missing) unchanged", async () => {
     const port = new ClaudeCliPort({
       run: async () => {
