@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { ClaudeCliPort } from "../src/claude-port.js";
-import type { ProcessResult, ProcessRunner } from "../src/claude-port.js";
+import type { InteractiveProcessResult, InteractiveProcessRunner, ProcessResult, ProcessRunner } from "../src/claude-port.js";
 
 function fakeRun(result: ProcessResult, capture?: { command?: string; args?: string[]; env?: NodeJS.ProcessEnv }): ProcessRunner {
+  return async (command, args, options) => {
+    if (capture) {
+      capture.command = command;
+      capture.args = args;
+      capture.env = options.env;
+    }
+    return result;
+  };
+}
+
+function fakeRunInteractive(
+  result: InteractiveProcessResult,
+  capture?: { command?: string; args?: string[]; env?: NodeJS.ProcessEnv },
+): InteractiveProcessRunner {
   return async (command, args, options) => {
     if (capture) {
       capture.command = command;
@@ -117,5 +131,74 @@ describe("ClaudeCliPort.authStatus", () => {
     });
 
     await expect(port.authStatus()).rejects.toThrow(/ENOENT/);
+  });
+});
+
+describe("ClaudeCliPort.login", () => {
+  it("invokes `claude auth login`", async () => {
+    const capture: { command?: string; args?: string[] } = {};
+    const port = new ClaudeCliPort({
+      runInteractive: fakeRunInteractive({ exitCode: 0 }, capture),
+    });
+
+    await port.login();
+
+    expect(capture.command).toBe("claude");
+    expect(capture.args).toEqual(["auth", "login"]);
+  });
+
+  it("sets CLAUDE_CONFIG_DIR to the given directory when logging in a bound Profile", async () => {
+    const capture: { env?: NodeJS.ProcessEnv } = {};
+    const port = new ClaudeCliPort({
+      runInteractive: fakeRunInteractive({ exitCode: 0 }, capture),
+    });
+
+    await port.login("/profiles/work");
+
+    expect(capture.env?.CLAUDE_CONFIG_DIR).toBe("/profiles/work");
+  });
+
+  it("leaves CLAUDE_CONFIG_DIR untouched (deferring to the ambient environment) when no directory is given", async () => {
+    const originalValue = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = "/should-pass-through";
+    try {
+      const capture: { env?: NodeJS.ProcessEnv } = {};
+      const port = new ClaudeCliPort({
+        runInteractive: fakeRunInteractive({ exitCode: 0 }, capture),
+      });
+
+      await port.login();
+
+      expect(capture.env?.CLAUDE_CONFIG_DIR).toBe("/should-pass-through");
+    } finally {
+      if (originalValue === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = originalValue;
+    }
+  });
+
+  it("resolves when the login flow exits 0", async () => {
+    const port = new ClaudeCliPort({
+      runInteractive: fakeRunInteractive({ exitCode: 0 }),
+    });
+
+    await expect(port.login()).resolves.toBeUndefined();
+  });
+
+  it("throws when the login flow exits non-zero", async () => {
+    const port = new ClaudeCliPort({
+      runInteractive: fakeRunInteractive({ exitCode: 1 }),
+    });
+
+    await expect(port.login()).rejects.toThrow(/exited with code 1/);
+  });
+
+  it("propagates a process-runner rejection (e.g. the claude binary is missing) unchanged", async () => {
+    const port = new ClaudeCliPort({
+      runInteractive: async () => {
+        throw new Error("spawn claude ENOENT");
+      },
+    });
+
+    await expect(port.login()).rejects.toThrow(/ENOENT/);
   });
 });
