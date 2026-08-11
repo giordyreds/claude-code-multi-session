@@ -68,3 +68,28 @@ _Avoid_: mismatch, desync, stale
 Resolving Drift by accepting the observed identity as truth and updating the expected
 identity to match.
 _Avoid_: repair, fix, heal, sync
+
+**Setup**:
+The one-time act of making this tool available to new shells — adding the `ccp` shell
+function to the shell startup file, then verifying the machine can run the tool. Distinct
+from Default install, which is Claude Code's own configuration and is neither created nor
+managed here: Setup wires up `ccp`, never Claude Code. Also distinct from *installing the
+package*, the earlier and separate act of putting the `ccp` command on `PATH` — that word
+stays free for what npm does, and never names this.
+_Avoid_: install, installation, bootstrap, provisioning, init
+
+### Dependence on Claude Code
+
+**Contract**:
+A behaviour of Claude Code that this tool depends on and does not control — the shape of
+its machine-readable identity output, the existence of a subcommand, the isolation its
+config-directory variable actually provides. Anthropic never documented these and owes us
+nothing, so a Contract is verified by observation and never assumed from a version number.
+_Avoid_: API, interface, dependency, assumption, guarantee
+
+**Check**:
+A runtime verification that a Contract still holds, reported by name alongside what it
+found. A Check reports; it never repairs — repair is Reconciliation and `ccp sync`. Not to
+be confused with a *probe*, which throughout this repository's decision records means a
+manual experiment run during design, not something the tool performs.
+_Avoid_: probe, test, validation, health check, diagnostic

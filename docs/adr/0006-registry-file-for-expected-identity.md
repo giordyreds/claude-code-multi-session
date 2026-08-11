@@ -100,3 +100,24 @@ entry rather than computing one. Concretely, `ccp login <alias>`:
 The rest of this decision — the registry living at `<state dir>/registry.json`, a missing file
 reading as empty, a malformed one failing loudly, and one alias's `recordExpectedIdentity` never
 disturbing another's — holds exactly as written.
+
+## Amendment: the state directory is renamed to `~/.ccp` (#31)
+
+This decision names the tool's state directory as `~/.ccacct`, after a name the tool no longer
+uses — the command is `ccp`. A user who encounters the directory cannot connect it to the command
+they type, and both `ccp doctor` and the Setup inverse will be printing that path at people.
+**The state directory is renamed `~/.ccp`**, and the environment variable that overrides it is
+renamed to match — `0007-profiles-root-and-expected-identity-contract`, which introduced that
+variable, carries the same rename in its own amendment.
+
+Nothing about the *shape* fixed here moves. The registry is still `<state dir>/registry.json`, a
+Profile's config directory is still `<state dir>/profiles/<alias>` as the "Superseded, in part"
+section above corrected it to, and every consequence recorded above holds verbatim — only the
+default value of `<state dir>` changes.
+
+**One name is honoured; there is no dual-read and no migration code.** The old name is not
+silently accepted, and nothing moves an existing directory automatically. Instead, `ccp doctor`
+detects a state directory under the old name and prints the single `mv` that resolves it — the
+non-destructive choice, and the one that cannot silently orphan a Profile. This is a breaking
+change to `ccp`'s own surface and takes a major version bump, which is why it happens now, while
+exactly one machine holds a state directory and the rename is still free.
