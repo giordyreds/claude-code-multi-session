@@ -20,9 +20,10 @@ import {
 } from "./registry.js";
 import { repairRig } from "./rig.js";
 import { renderSettings } from "./settings.js";
+import { packageVersion } from "./version.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history";
+  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history\n\nFlags:\n  --version          Print ccp's own version\n  --help             Print this usage text";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
 const RUN_USAGE = "Usage: ccp run <alias> -- <command> [args...]";
@@ -150,6 +151,17 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
+    return 0;
+  }
+
+  // Answered before the command switch, since it is a flag rather than a command and prints
+  // nothing but the version — the shape a bug report or a script can quote verbatim (ADR-0010).
+  if (argv[0] === "--version") {
+    try {
+      stdout(await packageVersion());
+    } catch (err) {
+      return reportError(stderr, err);
+    }
     return 0;
   }
 

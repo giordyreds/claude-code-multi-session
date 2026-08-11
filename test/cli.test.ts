@@ -115,6 +115,18 @@ describe("runCli", () => {
     expect(stdout.join("\n")).toMatch(/usage/i);
   });
 
+  it("prints the package version to stdout and exits 0 on --version", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    const declared = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
+
+    const code = await runCli(["--version"], { stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    // Bare — nothing but the version, so `ccp --version` is usable in a bug report or a script.
+    expect(stdout).toEqual([declared]);
+    expect(stderr).toEqual([]);
+  });
+
   it("reports an unknown command to stderr, never stdout, and exits 1", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
 

@@ -61,6 +61,10 @@ Commands:
   sync               Re-render every Profile's settings and repair its Rig sharing
   rm <alias> --yes   Permanently remove a Profile, its configuration and its
                      isolated history
+
+Flags:
+  --version          Print ccp's own version
+  --help             Print this usage text
 ```
 
 A typical setup:

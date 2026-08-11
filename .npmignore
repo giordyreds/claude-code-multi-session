@@ -1,0 +1,8 @@
+# Deliberately empty of rules, and deliberately present.
+#
+# npm consults `.gitignore` only when a package declares no ignore file of its own. This project's
+# `.gitignore` excludes `dist/`, the build output the installed `ccp` command *is* — so without
+# this file, the npm versions that apply that fallback strip the build output from the package and
+# install a command pointing at a file that was never shipped (ADR-0009, issue #30).
+#
+# What ships is decided by `files` in `package.json`, not here. Nothing belongs in this file.
