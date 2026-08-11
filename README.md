@@ -41,12 +41,18 @@ standalone `ccp` executable with the JavaScript runtime baked in — no Node.js,
 `npm install`. Grab the asset for your platform and put it on your `PATH`:
 
 ```sh
-# macOS (Apple Silicon) — swap the slug for your platform, and vX.Y.Z for the release
-curl -fsSL -o ccp.tar.gz \
-  https://github.com/giordyreds/claude-code-multi-session/releases/download/vX.Y.Z/ccp-X.Y.Z-darwin-arm64.tar.gz
-tar -xzf ccp.tar.gz
+# macOS (Apple Silicon) — swap the pattern for your platform, and the tag for the release
+gh release download vX.Y.Z \
+  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-darwin-arm64.tar.gz"
+tar -xzf ccp-*-darwin-arm64.tar.gz
 sudo mv ccp /usr/local/bin/
 ```
+
+This repository is private, so the asset needs an authenticated request — a plain `curl`
+gets a 404, indistinguishable from the asset not existing, whether or not you're logged
+in. [`gh`](https://cli.github.com/), already authenticated (`gh auth login`), carries
+that authentication for you. (If you'd rather use `curl` directly:
+`curl -fsSL -H "Authorization: Bearer $(gh auth token)" -H "Accept: application/octet-stream" -o ccp.tar.gz "$(gh api repos/giordyreds/claude-code-multi-session/releases/tags/vX.Y.Z --jq '.assets[] | select(.name | endswith("darwin-arm64.tar.gz")) | .url')"`.)
 
 | Platform | Asset slug |
 | --- | --- |
