@@ -61,6 +61,17 @@ export interface ClaudePort {
    * it (ADR-0001).
    */
   login(configDir?: string): Promise<void>;
+
+  /**
+   * Resolves the version string `claude --version` reports. Not scoped to any Profile — unlike
+   * {@link authStatus}/{@link login}, Claude Code's own version doesn't depend on which
+   * `CLAUDE_CONFIG_DIR` is in effect — so this takes no `configDir` parameter.
+   *
+   * `ccp doctor`'s Claude Code version Check (ticket #33) reads it through this method rather
+   * than spawning `claude` directly, per issue #28: one port every invocation of the `claude`
+   * executable already goes through, never a second one added just for this.
+   */
+  version(): Promise<string>;
 }
 
 async function runProcess(command: string, args: string[], options: { env: NodeJS.ProcessEnv }): Promise<ProcessResult> {
@@ -144,6 +155,19 @@ export class ClaudeCliPort implements ClaudePort {
       throw new Error(`'${CLAUDE_COMMAND} auth login' exited with code ${exitCode ?? "null"}.`);
     }
   }
+
+  async version(): Promise<string> {
+    const result = await this.runProcess(CLAUDE_COMMAND, ["--version"], { env: process.env });
+
+    // No `--json` shape exists for this (unlike `auth status`), so there is nothing to parse —
+    // only whitespace to trim. Judged by output shape, same as `authStatus`: a real failure to
+    // spawn already rejects via `runProcess`'s own `error` handling, not resolves here.
+    const version = result.stdout.trim();
+    if (version.length === 0) {
+      throw new Error(`'${CLAUDE_COMMAND} --version' produced no output: ${summarize(result)}`);
+    }
+    return version;
+  }
 }
 
 /**
@@ -160,19 +184,30 @@ function withConfigDir(configDir?: string): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * Named in every error thrown below when `claude auth status --json`'s output no longer parses
+ * the way this project assumes (CONTEXT.md's Contract): Anthropic never documented this shape and
+ * owes us nothing (ADR-0010), so the most likely explanation for a sudden parse failure is that
+ * Claude Code itself changed underneath this tool, not that this one invocation glitched. Points
+ * at `ccp doctor` rather than leaving a bare parse error to guess at, since that's the command
+ * built to say what's actually still true on this machine (issue #34).
+ */
+const CONTRACT_CHANGED_HINT =
+  "Claude Code may have changed how it reports identity. Run 'ccp doctor' to see what still holds on this machine.";
+
 function toAuthStatus(result: ProcessResult): AuthStatus {
   let parsed: unknown;
   try {
     parsed = JSON.parse(result.stdout);
   } catch {
     throw new Error(
-      `'${CLAUDE_COMMAND} auth status --json' produced unparseable output: ${summarize(result)}`,
+      `'${CLAUDE_COMMAND} auth status --json' produced unparseable output: ${summarize(result)}. ${CONTRACT_CHANGED_HINT}`,
     );
   }
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || !("loggedIn" in parsed)) {
     throw new Error(
-      `'${CLAUDE_COMMAND} auth status --json' produced unexpected output: ${JSON.stringify(parsed)}`,
+      `'${CLAUDE_COMMAND} auth status --json' produced unexpected output: ${JSON.stringify(parsed)}. ${CONTRACT_CHANGED_HINT}`,
     );
   }
 

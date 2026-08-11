@@ -94,3 +94,20 @@ deleted. `ccp use <alias>` now does exactly what this ADR's own Consequences pre
   variable.
 - Drift is now reachable outside tests exactly as intended: `ccp login` records a real Expected
   identity, `ccp use` reads it back from the same registry, no stand-in file required.
+
+## Amendment: `~/.ccacct` becomes `~/.ccp`, and `CCACCT_HOME` becomes `CCP_HOME` (#31)
+
+This ADR introduced both names that carry the tool's dead name: the state directory root
+`~/.ccacct`, and the `CCACCT_HOME` variable that overrides it. The command is `ccp`, so **the
+state directory is renamed `~/.ccp` and the override variable is renamed `CCP_HOME`** — the same
+rename, recorded here and in ADR-0006 because these are the two decisions that name the directory.
+
+The variable's *purpose* is untouched. As the amendment above reconciled it, `CCP_HOME` is read
+once, in `cli.ts`'s `defaultStateDir`, as the environment fallback for the `stateDir` option
+threaded through every subcommand — which is what lets `test/shell-integration.test.ts` bind the
+real, built CLI against a temp directory without touching `$HOME`, exactly the reason this ADR
+introduced the variable in the first place. Only the name changes.
+
+**The old variable is not honoured.** One name, no dual-read, no migration code, consistent with
+ADR-0006's amendment: a state directory found under the old name is reported by `ccp doctor` with
+the `mv` that resolves it, never moved automatically.

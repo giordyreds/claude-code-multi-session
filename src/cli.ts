@@ -4,6 +4,17 @@ import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
 import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
 import { ProcessDaemonPort, type DaemonPort } from "./daemon.js";
+import {
+  CONTRACT_CLAUDE_ON_PATH,
+  CONTRACT_STATE_DIRECTORY,
+  LEGACY_STATE_DIR_NAME,
+  loadVerifiedVersion,
+  recordVerifiedVersion,
+  resolveClaudeVersion,
+  runDoctorChecks,
+  SHELL_WIRING_LINE,
+  shellWiringPresent,
+} from "./doctor.js";
 import { isDrifted } from "./drift.js";
 import { seedOnboardingState, type OnboardingSeeder } from "./onboarding.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
@@ -20,9 +31,12 @@ import {
 } from "./registry.js";
 import { repairRig } from "./rig.js";
 import { renderSettings } from "./settings.js";
+import { removeShellWiringLine, writeShellWiringLine } from "./setup.js";
+import { shellInitScript } from "./shell-init.js";
+import { packageVersion } from "./version.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history";
+  "Usage: ccp <command>\n\nCommands:\n  setup              Wire the `ccp` shell function into your shell's startup file and verify the\n                     machine can run the tool — the second command after installing\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  shell-init         Emit the `ccp` shell function, for a shell startup file to `eval`\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  doctor             Run every Check and report each Contract by name alongside what it found —\n                     reports only, never repairs (see `ccp sync`)\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history\n  teardown           Undo Setup: remove the shell wiring line it added — never touches Profiles\n\nFlags:\n  --version          Print ccp's own version\n  --dry-run          With `setup`, print the line it would add instead of writing it\n  --help             Print this usage text";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
 const RUN_USAGE = "Usage: ccp run <alias> -- <command> [args...]";
@@ -46,13 +60,13 @@ const BASE_SETTINGS_FILE_NAME = "settings.json";
 const OVERRIDE_SETTINGS_FILE_NAME = "settings.override.json";
 
 /** The tool's own state directory: holds the Profile registry and every managed Profile's
- * isolated config directory. Overridable via `CCACCT_HOME` so tests — including the zsh
+ * isolated config directory. Overridable via `CCP_HOME` so tests — including the zsh
  * integration test, which spawns the real built binary rather than calling {@link runCli}
  * directly — never touch a real `$HOME`. */
 function defaultStateDir(env: NodeJS.ProcessEnv): string {
-  const override = env.CCACCT_HOME;
+  const override = env.CCP_HOME;
   if (override) return resolvePath(override);
-  return join(homedir(), ".ccacct");
+  return join(homedir(), ".ccp");
 }
 
 /** The Default install's configuration directory — the source of the Rig shared into every
@@ -74,6 +88,22 @@ function defaultInstallStateFilePath(): string {
   return join(homedir(), ".claude.json");
 }
 
+/** Where a state directory under the pre-rename name (issue #31) would live — `~/.ccacct`, the
+ * name `defaultStateDir` used before it became `~/.ccp`. `ccp doctor`'s Legacy state directory
+ * Check looks here for detection only; nothing ever reads or moves what it finds. */
+function defaultLegacyStateDir(): string {
+  return join(homedir(), LEGACY_STATE_DIR_NAME);
+}
+
+/** The `.zshrc` a real interactive zsh actually reads: `$ZDOTDIR/.zshrc` when the zsh
+ * dot-directory environment variable is set, `~/.zshrc` otherwise (issue #28's Setup decisions —
+ * the same file Setup will target once it exists). `ccp doctor`'s Shell wiring Check reads this
+ * file; it never writes to it. */
+function defaultZshrcPath(env: NodeJS.ProcessEnv): string {
+  const dotDir = env.ZDOTDIR || homedir();
+  return join(dotDir, ".zshrc");
+}
+
 export interface RunCliOptions {
   /** The shell environment to resolve Binding from. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
@@ -86,7 +116,7 @@ export interface RunCliOptions {
    */
   claudePort?: ClaudePort;
   /** Test seam: the tool's own state directory, holding the Profile registry and every managed
-   * Profile's isolated config directory. Defaults to `~/.ccacct`, or `$CCACCT_HOME` if set. */
+   * Profile's isolated config directory. Defaults to `~/.ccp`, or `$CCP_HOME` if set. */
   stateDir?: string;
   /** Test seam: the Default install's configuration directory — the source of the Rig shared
    * into every newly added Profile (ADR-0007). Defaults to `~/.claude`. */
@@ -116,6 +146,12 @@ export interface RunCliOptions {
    * filesystem permission errors. Defaults to the real {@link seedOnboardingState}.
    */
   onboardingSeeder?: OnboardingSeeder;
+  /** Test seam: where a state directory under the pre-rename name (issue #31) would live, for
+   * `ccp doctor`'s Legacy state directory Check. Defaults to `~/.ccacct`. */
+  legacyStateDir?: string;
+  /** Test seam: the `.zshrc` `ccp doctor`'s Shell wiring Check reads. Defaults to
+   * `$ZDOTDIR/.zshrc`, or `~/.zshrc` if `$ZDOTDIR` isn't set. */
+  zshrcPath?: string;
 }
 
 /** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
@@ -147,15 +183,30 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const picker = options.picker ?? new TtyPicker();
   const commandRunner = options.commandRunner ?? runCommand;
   const onboardingSeeder = options.onboardingSeeder ?? seedOnboardingState;
+  const legacyStateDir = options.legacyStateDir ?? defaultLegacyStateDir();
+  const zshrcPath = options.zshrcPath ?? defaultZshrcPath(env);
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
     return 0;
   }
 
+  // Answered before the command switch, since it is a flag rather than a command and prints
+  // nothing but the version — the shape a bug report or a script can quote verbatim (ADR-0010).
+  if (argv[0] === "--version") {
+    try {
+      stdout(await packageVersion());
+    } catch (err) {
+      return reportError(stderr, err);
+    }
+    return 0;
+  }
+
   const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir, daemonPort, picker, commandRunner };
 
   switch (argv[0]) {
+    case "setup":
+      return runSetup(argv.slice(1), { env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, zshrcPath, stdout, stderr });
     case "whoami":
       return runWhoami(deps);
     case "add":
@@ -166,14 +217,20 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       return runLogin(argv.slice(1), { stateDir, installDir, installStateFilePath, stdout, stderr, claudePort, onboardingSeeder });
     case "use":
       return runUse(argv[1], deps);
+    case "shell-init":
+      return runShellInit(deps);
     case "run":
       return runRun(argv.slice(1), deps);
     case "reconcile":
       return runReconcile(argv[1], { stateDir, stdout, stderr, claudePort });
     case "sync":
       return runSync({ stateDir, installDir, stdout, stderr });
+    case "doctor":
+      return runDoctor({ env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, zshrcPath, stdout, stderr });
     case "rm":
       return runRm(argv.slice(1), deps);
+    case "teardown":
+      return runTeardown({ zshrcPath, stateDir, stdout, stderr });
     default:
       stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
       return 1;
@@ -358,6 +415,31 @@ async function runUse(aliasArg: string | undefined, deps: CliDeps): Promise<numb
  * an Alias like `foo"; rm -rf ~ #` break out of the `export` line the `ccp` shell function evals. */
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * `ccp shell-init`: prints the `ccp` shell function's source (`shell/ccp.sh`) on stdout and
+ * nothing else, so a shell startup file can `eval` it instead of `source`-ing the file by an
+ * absolute path that a Node version manager can silently move out from under it (ADR-0004's
+ * Amendment 1, issue #32). `shell/ccp.sh` stays the single source of truth — {@link
+ * shellInitScript} reads and returns it rather than this file duplicating its text — so the two
+ * can never drift apart.
+ *
+ * Same stdout discipline ADR-0004 already requires of `ccp use`: this output is `eval`'d too, at
+ * the start of every interactive shell, so a diagnostic reaching stdout here would be evaluated as
+ * code exactly like a stray warning on `ccp use`'s stdout would be. The one failure mode —
+ * `shell/ccp.sh` missing or unreadable — goes to stderr instead.
+ */
+async function runShellInit(deps: { stdout: (line: string) => void; stderr: (line: string) => void }): Promise<number> {
+  let script: string;
+  try {
+    script = await shellInitScript();
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  deps.stdout(script);
+  return 0;
 }
 
 /**
@@ -809,4 +891,184 @@ async function syncProfile(alias: string, record: ProfileRecord, installDir: str
     line: changes.length > 0 ? `${alias}: ${changes.join("; ")}` : `${alias}: no changes`,
     skipped: false,
   };
+}
+
+/** The two Contract names (`doctor.ts`'s `runDoctorChecks` output) whose own Check failing is the
+ * *only* thing allowed to fail `ccp setup` (issue #35's fixed fatal/non-fatal rule) — every other
+ * Check's problem is still reported, but Setup succeeds anyway, matching the posture already
+ * taken for onboarding pre-seeding: somebody else's Contract changing is not this tool's error.
+ * Built from `doctor.ts`'s own exported constants, not retyped string literals, so a rename of
+ * either Check's name there can never silently desync from this rule. */
+const SETUP_FATAL_CONTRACTS = new Set([CONTRACT_CLAUDE_ON_PATH, CONTRACT_STATE_DIRECTORY]);
+
+/**
+ * `ccp setup` (issue #35): the second and last command a new user types. Adds
+ * {@link SHELL_WIRING_LINE} to the interactive startup file the user's shell actually reads
+ * (`zshrcPath`, resolved the same way `ccp doctor`'s Shell wiring Check reads it — honouring
+ * `$ZDOTDIR` ahead of `$HOME`), then runs the exact same Checks `ccp doctor` exposes
+ * ({@link runDoctorChecks}) so problems surface here, once, rather than later as unexplained
+ * failures. One implementation, two entry points — this function never reimplements a Check.
+ *
+ * `--dry-run` previews the line-writing step only — the machine's state is what it already was,
+ * so there is nothing to verify and no Checks run. It prints exactly what would be added (or that
+ * there's nothing to add, when the line is already present) and nothing else.
+ *
+ * Writing the line always happens first, unconditionally, even when a Check that follows turns
+ * out to fail Setup: the write is independent of whether `claude` is on `PATH` or the state
+ * directory is writable, and the shell wiring line itself is exactly as useful once `claude` is
+ * later fixed. Only {@link SETUP_FATAL_CONTRACTS}'s two Contracts fail Setup's own exit code —
+ * every other Check's finding is still printed, per issue #35's acceptance criteria that a
+ * merely-incomplete machine still ends up wired correctly.
+ *
+ * Ends by naming the next command to run, unconditionally, per this ticket's own acceptance
+ * criteria — success points at `ccp add`; a fatal failure points back at re-running `ccp setup`
+ * once the reported problem (a missing `claude`, an unwritable state directory) is fixed, rather
+ * than leaving a failed run silent about what to do next.
+ */
+async function runSetup(
+  args: string[],
+  deps: {
+    env: NodeJS.ProcessEnv;
+    claudePort: ClaudePort;
+    stateDir: string;
+    installDir: string;
+    installStateFilePath: string;
+    legacyStateDir: string;
+    zshrcPath: string;
+    stdout: (line: string) => void;
+    stderr: (line: string) => void;
+  },
+): Promise<number> {
+  if (args.includes("--dry-run")) {
+    let present: boolean;
+    try {
+      present = await shellWiringPresent(deps.zshrcPath);
+    } catch (err) {
+      return reportError(deps.stderr, err);
+    }
+
+    deps.stdout(
+      present
+        ? `Dry run: ${deps.zshrcPath} already contains the shell wiring line — nothing to add.`
+        : `Dry run: would add the following line to ${deps.zshrcPath}:\n  ${SHELL_WIRING_LINE}`,
+    );
+    return 0;
+  }
+
+  let writeResult: { added: boolean };
+  try {
+    writeResult = await writeShellWiringLine(deps.zshrcPath);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  const lines: string[] = [
+    writeResult.added
+      ? `Added the following line to ${deps.zshrcPath}:\n  ${SHELL_WIRING_LINE}`
+      : `${deps.zshrcPath} already contains the shell wiring line — nothing to add.`,
+  ];
+
+  const reports = await runDoctorChecks({
+    env: deps.env,
+    claudePort: deps.claudePort,
+    stateDir: deps.stateDir,
+    installDir: deps.installDir,
+    installStateFilePath: deps.installStateFilePath,
+    legacyStateDir: deps.legacyStateDir,
+    zshrcPath: deps.zshrcPath,
+  });
+  for (const report of reports) lines.push(`${report.contract}: ${report.finding}`);
+
+  const fatal = reports.some((report) => SETUP_FATAL_CONTRACTS.has(report.contract) && !report.ok);
+  lines.push(
+    fatal
+      ? "Next: fix the problem reported above, then re-run 'ccp setup'."
+      : "Next: run 'ccp add <alias>' to create your first Profile.",
+  );
+
+  deps.stdout(lines.join("\n"));
+  return fatal ? 1 : 0;
+}
+
+/**
+ * `ccp teardown`: Setup's inverse (issue #35). Removes only {@link SHELL_WIRING_LINE} from the
+ * startup file Setup added it to — leaving every other line in the file untouched, and never
+ * touching Profiles, the state directory, or anything else. Safe to run when Setup was never run
+ * at all: {@link removeShellWiringLine} reports `removed: false` rather than throwing when
+ * there's no line to remove.
+ *
+ * Always reports what it deliberately left behind — the state directory and the existing
+ * per-Profile removal command — so the non-destructive choice this makes is visible rather than
+ * silent (this ticket's own acceptance criteria), regardless of whether there was a line to
+ * remove this time.
+ */
+async function runTeardown(deps: {
+  zshrcPath: string;
+  stateDir: string;
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
+}): Promise<number> {
+  let result: { removed: boolean };
+  try {
+    result = await removeShellWiringLine(deps.zshrcPath);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  const lines = [
+    result.removed
+      ? `Removed the shell wiring line from ${deps.zshrcPath}.`
+      : `${deps.zshrcPath} had no shell wiring line to remove — nothing to do.`,
+    `Left behind on purpose: your Profiles, still under ${deps.stateDir}. Remove one yourself with 'ccp rm <alias> --yes'.`,
+  ];
+
+  deps.stdout(lines.join("\n"));
+  return 0;
+}
+
+/**
+ * `ccp doctor` (ticket #33, issue #34): runs every Check — including the identity Check, the only
+ * one that spawns a process per Profile (ADR-0010) — and reports each Contract by name alongside
+ * what it found (CONTEXT.md's Check). Reports only: like every Check in this project, it never
+ * repairs anything — that stays with `ccp sync`.
+ *
+ * The one deliberate exception to "never writes anything to disk" is this function itself, not
+ * {@link runDoctorChecks} (still read-only, still asserted directly by its own tests): once every
+ * Check has run, if every single one of them reports `ok` — nothing found on the machine that
+ * indicates a Contract broke, isolation included — it records the Claude Code version this run
+ * saw as the version its Checks last *passed* against (ADR-0010's "honest replacement for a
+ * matrix") via {@link recordVerifiedVersion}. A run that finds even one real problem never
+ * overwrites that record — it falls back to whatever was last actually recorded clean, or to
+ * "never recorded" if nothing has been — so "Verified against" always names a version this
+ * machine actually passed its Checks against, never merely the version it happened to be running
+ * during a broken run.
+ */
+async function runDoctor(deps: {
+  env: NodeJS.ProcessEnv;
+  claudePort: ClaudePort;
+  stateDir: string;
+  installDir: string;
+  installStateFilePath: string;
+  legacyStateDir: string;
+  zshrcPath: string;
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
+}): Promise<number> {
+  const reports = await runDoctorChecks(deps);
+  const allChecksClean = reports.every((report) => report.ok);
+
+  const versionResolution = await resolveClaudeVersion(deps.claudePort);
+  let verifiedVersion: string | null;
+  if (versionResolution.ok && allChecksClean) {
+    await recordVerifiedVersion(deps.stateDir, versionResolution.version);
+    verifiedVersion = versionResolution.version;
+  } else {
+    verifiedVersion = await loadVerifiedVersion(deps.stateDir);
+  }
+
+  const lines = reports.map((report) => `${report.contract}: ${report.finding}`);
+  lines.push(`Verified against: ${verifiedVersion ?? "no version has ever been recorded on this machine"}`);
+
+  deps.stdout(lines.join("\n"));
+  return 0;
 }
