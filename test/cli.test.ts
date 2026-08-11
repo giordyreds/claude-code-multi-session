@@ -1,8 +1,8 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runCli } from "../src/cli.js";
+import { defaultShellRcPath, runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
 import type { CommandRunner } from "../src/command-runner.js";
 import type { DaemonPort } from "../src/daemon.js";
@@ -1138,7 +1138,7 @@ describe("runCli doctor", () => {
   let stateDir: string;
   let installDir: string;
   let legacyStateDir: string;
-  let zshrcPath: string;
+  let shellRcPath: string;
   let installStateFilePath: string;
   let fakeClaudeBinDir: string;
 
@@ -1147,7 +1147,7 @@ describe("runCli doctor", () => {
     installDir = await mkdtemp(join(tmpdir(), "ccp-cli-doctor-install-"));
     const scratch = await mkdtemp(join(tmpdir(), "ccp-cli-doctor-scratch-"));
     legacyStateDir = join(scratch, "ccacct");
-    zshrcPath = join(scratch, ".zshrc");
+    shellRcPath = join(scratch, ".zshrc");
     installStateFilePath = join(scratch, ".claude.json");
 
     // "claude on PATH" (src/doctor.ts) only ever checks the executable bit, never spawns it (see
@@ -1175,7 +1175,7 @@ describe("runCli doctor", () => {
       installDir,
       installStateFilePath,
       legacyStateDir,
-      zshrcPath,
+      shellRcPath,
       stdout: stdoutFn,
       stderr: stderrFn,
       claudePort,
@@ -1227,7 +1227,7 @@ describe("runCli doctor", () => {
      * where every Check comes back clean. */
     async function makeEveryOtherCheckClean(): Promise<void> {
       await writeFile(installStateFilePath, JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "1.0.0" }), "utf8");
-      await writeFile(zshrcPath, `# .zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
+      await writeFile(shellRcPath, `# .zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
     }
 
     it("records and reports the version once every Check comes back clean", async () => {
@@ -1250,7 +1250,7 @@ describe("runCli doctor", () => {
 
       // Shell wiring now regresses (as if someone edited the .zshrc back out) — a real problem on
       // this later run — even though the version itself is unchanged.
-      await writeFile(zshrcPath, "# .zshrc\n", "utf8");
+      await writeFile(shellRcPath, "# .zshrc\n", "utf8");
       const { stdout } = await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
 
       expect(stdout.join("\n")).toContain("Shell wiring: missing");
@@ -1304,16 +1304,16 @@ describe("runCli doctor", () => {
   it("detects missing shell wiring and prints the exact line to add", async () => {
     const { stdout } = await runDoctor();
 
-    expect(stdout.join("\n")).toContain(`Shell wiring: missing from ${zshrcPath}`);
+    expect(stdout.join("\n")).toContain(`Shell wiring: missing from ${shellRcPath}`);
     expect(stdout.join("\n")).toContain(SHELL_WIRING_LINE);
   });
 
   it("reports shell wiring present once the exact line has been added", async () => {
-    await writeFile(zshrcPath, `# .zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
+    await writeFile(shellRcPath, `# .zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
 
     const { stdout } = await runDoctor();
 
-    expect(stdout.join("\n")).toContain(`Shell wiring: present in ${zshrcPath}`);
+    expect(stdout.join("\n")).toContain(`Shell wiring: present in ${shellRcPath}`);
   });
 
   it("writes nothing at all when a Check found a real problem, since there is nothing clean to record (issue #34)", async () => {
@@ -1327,7 +1327,7 @@ describe("runCli doctor", () => {
     await writeFile(installStateFilePath, installState, "utf8");
     await mkdir(legacyStateDir, { recursive: true });
     const zshrcContents = "# .zshrc\n";
-    await writeFile(zshrcPath, zshrcContents, "utf8");
+    await writeFile(shellRcPath, zshrcContents, "utf8");
 
     const { code } = await runDoctor();
 
@@ -1338,7 +1338,7 @@ describe("runCli doctor", () => {
     await expect(stat(stateDir)).rejects.toThrow();
     // Neither file doctor only ever reads was modified.
     await expect(readFile(installStateFilePath, "utf8")).resolves.toBe(installState);
-    await expect(readFile(zshrcPath, "utf8")).resolves.toBe(zshrcContents);
+    await expect(readFile(shellRcPath, "utf8")).resolves.toBe(zshrcContents);
     // The legacy directory is untouched — still there, never moved.
     await expect(stat(legacyStateDir)).resolves.toBeDefined();
   });
@@ -1356,7 +1356,7 @@ describe("runCli setup (issue #35)", () => {
   let stateDir: string;
   let installDir: string;
   let legacyStateDir: string;
-  let zshrcPath: string;
+  let shellRcPath: string;
   let installStateFilePath: string;
 
   beforeEach(async () => {
@@ -1364,7 +1364,7 @@ describe("runCli setup (issue #35)", () => {
     installDir = await mkdtemp(join(tmpdir(), "ccp-cli-setup-install-"));
     const scratch = await mkdtemp(join(tmpdir(), "ccp-cli-setup-scratch-"));
     legacyStateDir = join(scratch, "ccacct");
-    zshrcPath = join(scratch, ".zshrc");
+    shellRcPath = join(scratch, ".zshrc");
     installStateFilePath = join(scratch, ".claude.json");
     // Every Check but the two fatal ones ("claude on PATH", "State directory") starts dirty by
     // default in this suite's fixtures (no onboarding state, no Rig contents, an absent legacy
@@ -1398,7 +1398,7 @@ describe("runCli setup (issue #35)", () => {
       installDir,
       installStateFilePath,
       legacyStateDir,
-      zshrcPath,
+      shellRcPath,
       claudePort: overrides.claudePort ?? fakeClaudePort({ loggedIn: false }),
       stdout: stdoutFn,
       stderr: stderrFn,
@@ -1406,27 +1406,27 @@ describe("runCli setup (issue #35)", () => {
   }
 
   it("writes the guarded line to a file that lacks it, and reports the file and the exact line", async () => {
-    await writeFile(zshrcPath, "# my zshrc\n", "utf8");
+    await writeFile(shellRcPath, "# my zshrc\n", "utf8");
     const binDir = await binDirOnPath();
 
     const { code, stdout } = await runSetup([], { env: { PATH: binDir } });
 
     expect(code).toBe(0);
-    expect(await readFile(zshrcPath, "utf8")).toBe(`# my zshrc\n${SHELL_WIRING_LINE}\n`);
+    expect(await readFile(shellRcPath, "utf8")).toBe(`# my zshrc\n${SHELL_WIRING_LINE}\n`);
     const report = stdout.join("\n");
-    expect(report).toContain(zshrcPath);
+    expect(report).toContain(shellRcPath);
     expect(report).toContain(SHELL_WIRING_LINE);
   });
 
   it("writes nothing to the file on a second run — idempotent", async () => {
     const binDir = await binDirOnPath();
     await runSetup([], { env: { PATH: binDir } });
-    const afterFirstRun = await readFile(zshrcPath, "utf8");
+    const afterFirstRun = await readFile(shellRcPath, "utf8");
 
     const { code, stdout } = await runSetup([], { env: { PATH: binDir } });
 
     expect(code).toBe(0);
-    expect(await readFile(zshrcPath, "utf8")).toBe(afterFirstRun);
+    expect(await readFile(shellRcPath, "utf8")).toBe(afterFirstRun);
     expect(stdout.join("\n")).toMatch(/already contains the shell wiring line/i);
   });
 
@@ -1437,7 +1437,9 @@ describe("runCli setup (issue #35)", () => {
 
     try {
       const code = await runCli(["setup"], {
-        env: { PATH: binDir, ZDOTDIR: zdotdir },
+        // $SHELL must name zsh for $ZDOTDIR to apply at all (issue #40) — every other $SHELL
+        // resolves to ~/.bashrc regardless of $ZDOTDIR, covered separately below.
+        env: { PATH: binDir, SHELL: "/usr/bin/zsh", ZDOTDIR: zdotdir },
         stateDir,
         installDir,
         installStateFilePath,
@@ -1461,18 +1463,18 @@ describe("runCli setup (issue #35)", () => {
 
     expect(code).toBe(0);
     expect(stdout.join("\n")).toContain(SHELL_WIRING_LINE);
-    await expect(stat(zshrcPath)).rejects.toThrow();
+    await expect(stat(shellRcPath)).rejects.toThrow();
   });
 
   it("dry run reports there is nothing to add when the line is already present", async () => {
-    await writeFile(zshrcPath, `# my zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
-    const before = await readFile(zshrcPath, "utf8");
+    await writeFile(shellRcPath, `# my zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
+    const before = await readFile(shellRcPath, "utf8");
 
     const { code, stdout } = await runSetup(["--dry-run"]);
 
     expect(code).toBe(0);
     expect(stdout.join("\n")).toMatch(/already contains/i);
-    expect(await readFile(zshrcPath, "utf8")).toBe(before);
+    expect(await readFile(shellRcPath, "utf8")).toBe(before);
   });
 
   it("runs the same Checks `ccp doctor` exposes and reports every Contract by name", async () => {
@@ -1495,7 +1497,7 @@ describe("runCli setup (issue #35)", () => {
       expect(report).toContain(`${contract}:`);
     }
     // Shell wiring now reports present, since the write above ran before the Checks did.
-    expect(report).toContain(`Shell wiring: present in ${zshrcPath}`);
+    expect(report).toContain(`Shell wiring: present in ${shellRcPath}`);
   });
 
   it("ends by naming the next command to run, on success", async () => {
@@ -1533,7 +1535,7 @@ describe("runCli setup (issue #35)", () => {
           installDir,
           installStateFilePath,
           legacyStateDir,
-          zshrcPath,
+          shellRcPath,
           claudePort: fakeClaudePort({ loggedIn: false }),
           stdout: stdoutFn,
           stderr: stderrFn,
@@ -1559,7 +1561,7 @@ describe("runCli setup (issue #35)", () => {
         installDir: missingInstallDir,
         installStateFilePath,
         legacyStateDir,
-        zshrcPath,
+        shellRcPath,
         claudePort: fakeClaudePort({ loggedIn: false }),
         stdout: stdoutFn,
         stderr: stderrFn,
@@ -1603,12 +1605,12 @@ describe("runCli setup (issue #35)", () => {
 describe("runCli teardown (issue #35)", () => {
   let stateDir: string;
   let scratch: string;
-  let zshrcPath: string;
+  let shellRcPath: string;
 
   beforeEach(async () => {
     stateDir = join(await mkdtemp(join(tmpdir(), "ccp-cli-teardown-test-")), "ccp");
     scratch = await mkdtemp(join(tmpdir(), "ccp-cli-teardown-scratch-"));
-    zshrcPath = join(scratch, ".zshrc");
+    shellRcPath = join(scratch, ".zshrc");
   });
 
   afterEach(async () => {
@@ -1618,7 +1620,7 @@ describe("runCli teardown (issue #35)", () => {
 
   function runTeardown() {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    return runCli(["teardown"], { stateDir, zshrcPath, stdout: stdoutFn, stderr: stderrFn }).then((code) => ({
+    return runCli(["teardown"], { stateDir, shellRcPath, stdout: stdoutFn, stderr: stderrFn }).then((code) => ({
       code,
       stdout,
       stderr,
@@ -1626,23 +1628,23 @@ describe("runCli teardown (issue #35)", () => {
   }
 
   it("removes the line Setup added, leaving unrelated content in the file untouched", async () => {
-    await writeFile(zshrcPath, `# before\nexport FOO=bar\n${SHELL_WIRING_LINE}\n# after\n`, "utf8");
+    await writeFile(shellRcPath, `# before\nexport FOO=bar\n${SHELL_WIRING_LINE}\n# after\n`, "utf8");
 
     const { code, stdout } = await runTeardown();
 
     expect(code).toBe(0);
-    expect(await readFile(zshrcPath, "utf8")).toBe("# before\nexport FOO=bar\n# after\n");
+    expect(await readFile(shellRcPath, "utf8")).toBe("# before\nexport FOO=bar\n# after\n");
     expect(stdout.join("\n")).toMatch(/removed/i);
   });
 
   it("is safe to run when no line is present", async () => {
     const contents = "# my zshrc, never wired up\n";
-    await writeFile(zshrcPath, contents, "utf8");
+    await writeFile(shellRcPath, contents, "utf8");
 
     const { code, stdout } = await runTeardown();
 
     expect(code).toBe(0);
-    expect(await readFile(zshrcPath, "utf8")).toBe(contents);
+    expect(await readFile(shellRcPath, "utf8")).toBe(contents);
     expect(stdout.join("\n")).toMatch(/nothing to do/i);
   });
 
@@ -1650,11 +1652,11 @@ describe("runCli teardown (issue #35)", () => {
     const { code } = await runTeardown();
 
     expect(code).toBe(0);
-    await expect(stat(zshrcPath)).rejects.toThrow();
+    await expect(stat(shellRcPath)).rejects.toThrow();
   });
 
   it("reports what it deliberately left behind, naming the state directory and the per-Profile removal command — it never touches Profiles", async () => {
-    await writeFile(zshrcPath, `${SHELL_WIRING_LINE}\n`, "utf8");
+    await writeFile(shellRcPath, `${SHELL_WIRING_LINE}\n`, "utf8");
     await mkdir(stateDir, { recursive: true });
     await addProfile(stateDir, "work", await mkdtemp(join(tmpdir(), "ccp-cli-teardown-install-")));
 
@@ -2132,5 +2134,134 @@ describe("runCli rm", () => {
     const registry = await loadRegistry(stateDir);
     expect(registry.profiles.personal).toBeDefined();
     await expect(stat(personalConfigDir)).resolves.toBeDefined();
+  });
+});
+
+describe("defaultShellRcPath (issue #40, ADR-0012)", () => {
+  it("resolves ~/.bashrc when $SHELL names bash", () => {
+    expect(defaultShellRcPath({ SHELL: "/bin/bash" })).toBe(join(homedir(), ".bashrc"));
+  });
+
+  it("resolves ~/.zshrc when $SHELL names zsh and $ZDOTDIR is unset", () => {
+    expect(defaultShellRcPath({ SHELL: "/usr/bin/zsh" })).toBe(join(homedir(), ".zshrc"));
+  });
+
+  it("prefers $ZDOTDIR/.zshrc over ~/.zshrc when $SHELL names zsh", () => {
+    expect(defaultShellRcPath({ SHELL: "/usr/bin/zsh", ZDOTDIR: "/custom/zdotdir" })).toBe(join("/custom/zdotdir", ".zshrc"));
+  });
+
+  it("resolves ~/.bashrc when $SHELL is unset — bash is the fallback, never zsh", () => {
+    expect(defaultShellRcPath({})).toBe(join(homedir(), ".bashrc"));
+  });
+
+  it("resolves ~/.bashrc for an unrecognized $SHELL, e.g. fish", () => {
+    expect(defaultShellRcPath({ SHELL: "/usr/bin/fish" })).toBe(join(homedir(), ".bashrc"));
+  });
+
+  it("ignores $ZDOTDIR entirely when $SHELL doesn't name zsh — bash never reads a zsh dot-directory", () => {
+    expect(defaultShellRcPath({ SHELL: "/bin/bash", ZDOTDIR: "/custom/zdotdir" })).toBe(join(homedir(), ".bashrc"));
+  });
+
+  it("keys off $SHELL alone, never off process.platform — same result regardless of the running platform", () => {
+    // defaultShellRcPath takes no platform argument at all, so there is nothing platform-specific
+    // to vary here: the same env resolves the same path on darwin and linux (issue #40's "one
+    // code path, not a macOS path and a separate Linux path").
+    expect(defaultShellRcPath({ SHELL: "/bin/bash" })).toBe(join(homedir(), ".bashrc"));
+  });
+});
+
+describe("runCli Windows guard (issue #40, ADR-0012)", () => {
+  let stateDir: string;
+  let installDir: string;
+
+  beforeEach(async () => {
+    // stateDir itself deliberately doesn't exist yet (unlike its parent) — mirrors a machine
+    // that's never run `ccp add`/`ccp login`, so a `stat` on it staying rejected after the guard
+    // proves nothing was created, not merely that an already-existing directory was left alone.
+    stateDir = join(await mkdtemp(join(tmpdir(), "ccp-cli-windows-test-")), "ccp");
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-windows-install-"));
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
+  });
+
+  /** Every argv this suite checks is guarded identically — a representative subcommand from each
+   * shape `runCli` dispatches (a bare command, one that takes an alias, one that takes flags, and
+   * an unrecognised command), not just `setup`, per issue #40's own acceptance criteria. */
+  const GUARDED_ARGVS = [
+    ["setup"],
+    ["doctor"],
+    ["whoami"],
+    ["add", "work"],
+    ["ls"],
+    ["login", "work"],
+    ["use", "work"],
+    ["shell-init"],
+    ["run", "work", "--", "echo", "hi"],
+    ["reconcile", "work"],
+    ["sync"],
+    ["rm", "work", "--yes"],
+    ["teardown"],
+    ["nonexistent-command"],
+  ];
+
+  it.each(GUARDED_ARGVS)("guards '%s' before it touches anything", async (...argv) => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(argv, { platform: "win32", stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).not.toBe(0);
+    expect(stdout).toEqual([]);
+    expect(stderr.join("\n")).toMatch(/windows.*support/i);
+    // No Check ran, no file was written: the state directory `ccp add`/`ccp login` would
+    // otherwise create never gets created.
+    await expect(stat(stateDir)).rejects.toThrow();
+  });
+
+  it("prints the guard message to stderr, never stdout — ADR-0004's discipline applies here too", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    await runCli(["setup"], { platform: "win32", stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(stdout).toEqual([]);
+    expect(stderr.length).toBeGreaterThan(0);
+  });
+
+  it("never touches a Profile's registry, even for a command that would otherwise create one", async () => {
+    await runCli(["add", "work"], { platform: "win32", stateDir, installDir, stdout: () => {}, stderr: () => {} });
+
+    await expect(stat(stateDir)).rejects.toThrow();
+  });
+
+  it("still prints usage on a bare invocation — the guard sits after usage/version, not before", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli([], { platform: "win32", stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stdout.join("\n")).toMatch(/usage/i);
+    expect(stderr).toEqual([]);
+  });
+
+  it("still reports --version — a flag, not a subcommand that touches anything", async () => {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["--version"], { platform: "win32", stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(stdout).toHaveLength(1);
+  });
+
+  it("never guards on darwin or linux — only win32 triggers it", async () => {
+    const claudePort = fakeClaudePort({ loggedIn: false });
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    const code = await runCli(["ls"], { platform: "darwin", stateDir, installDir, claudePort, stdout: stdoutFn, stderr: stderrFn });
+
+    expect(code).toBe(0);
+    expect(stderr.join("\n")).not.toMatch(/windows/i);
   });
 });

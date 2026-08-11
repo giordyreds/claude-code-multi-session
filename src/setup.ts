@@ -19,11 +19,11 @@ export interface WriteShellWiringResult {
 }
 
 /**
- * Appends {@link SHELL_WIRING_LINE} to `zshrcPath`, unless it's already present. Idempotent by
+ * Appends {@link SHELL_WIRING_LINE} to `shellRcPath`, unless it's already present. Idempotent by
  * construction: a second call against a file this already wrote to finds the line via the same
  * `includes` check and does nothing.
  *
- * Creates `zshrcPath`'s parent directory first (`mkdir` with `recursive: true`) — a no-op on a
+ * Creates `shellRcPath`'s parent directory first (`mkdir` with `recursive: true`) — a no-op on a
  * real machine, where `$ZDOTDIR` or `$HOME` always exists, and only actually matters for a
  * from-scratch test seam that hasn't created one yet.
  *
@@ -31,13 +31,13 @@ export interface WriteShellWiringResult {
  * newline first only if the file is non-empty and doesn't already end in one), never overwriting
  * or reordering a byte of it.
  */
-export async function writeShellWiringLine(zshrcPath: string): Promise<WriteShellWiringResult> {
-  const existing = await readFileOrEmpty(zshrcPath);
+export async function writeShellWiringLine(shellRcPath: string): Promise<WriteShellWiringResult> {
+  const existing = await readFileOrEmpty(shellRcPath);
   if (existing.includes(SHELL_WIRING_LINE)) return { added: false };
 
   const needsLeadingNewline = existing.length > 0 && !existing.endsWith("\n");
-  await mkdir(dirname(zshrcPath), { recursive: true });
-  await writeFile(zshrcPath, `${existing}${needsLeadingNewline ? "\n" : ""}${SHELL_WIRING_LINE}\n`, "utf8");
+  await mkdir(dirname(shellRcPath), { recursive: true });
+  await writeFile(shellRcPath, `${existing}${needsLeadingNewline ? "\n" : ""}${SHELL_WIRING_LINE}\n`, "utf8");
   return { added: true };
 }
 
@@ -50,7 +50,7 @@ export interface RemoveShellWiringResult {
 
 /**
  * The inverse of {@link writeShellWiringLine} (issue #35's Setup inverse, `ccp teardown`):
- * removes every line exactly matching {@link SHELL_WIRING_LINE} from `zshrcPath`, leaving every
+ * removes every line exactly matching {@link SHELL_WIRING_LINE} from `shellRcPath`, leaving every
  * other line untouched — including one a user wrote by hand right next to it. Never touches
  * anything else: not Profiles, not the state directory, not the file at all when there's nothing
  * to remove from it.
@@ -59,11 +59,11 @@ export interface RemoveShellWiringResult {
  * that merely *contains* the wiring line as a substring of something longer is left alone —
  * only a line that matches it exactly is ever removed.
  */
-export async function removeShellWiringLine(zshrcPath: string): Promise<RemoveShellWiringResult> {
-  const existing = await readFileOrEmpty(zshrcPath);
+export async function removeShellWiringLine(shellRcPath: string): Promise<RemoveShellWiringResult> {
+  const existing = await readFileOrEmpty(shellRcPath);
   if (!existing.includes(SHELL_WIRING_LINE)) return { removed: false };
 
   const kept = existing.split("\n").filter((line) => line !== SHELL_WIRING_LINE);
-  await writeFile(zshrcPath, kept.join("\n"), "utf8");
+  await writeFile(shellRcPath, kept.join("\n"), "utf8");
   return { removed: true };
 }

@@ -8,10 +8,12 @@ import { loadRegistry, type ExpectedIdentity } from "./registry.js";
 import { RIG_ITEMS } from "./rig.js";
 
 /**
- * The exact guarded line Setup (CONTEXT.md) adds to a `.zshrc` — README.md's install
- * instructions, ADR-0004's Amendment 1 (issue #32). `ccp doctor`'s Shell wiring Check looks for
- * this precise text and prints it verbatim when it's missing, so what a user is told to add is
- * exactly what Setup would have added — one source of truth for the line, not two.
+ * The exact guarded line Setup (CONTEXT.md) adds to a shell startup file (`.zshrc` or `.bashrc`,
+ * see `defaultShellRcPath`, `src/cli.ts`, issue #40) — README.md's install instructions,
+ * ADR-0004's Amendment 1 (issue #32). `ccp doctor`'s Shell wiring Check looks for this precise
+ * text and prints it verbatim when it's missing, so what a user is told to add is exactly what
+ * Setup would have added — one source of truth for the line, not two. Plain POSIX `sh`, needing
+ * no bash/zsh distinction of its own.
  */
 export const SHELL_WIRING_LINE = 'if command -v ccp >/dev/null 2>&1; then eval "$(command ccp shell-init)"; fi';
 
@@ -56,8 +58,10 @@ export interface DoctorContext {
   installStateFilePath: string;
   /** Where a state directory under the pre-rename name (issue #31) would live. */
   legacyStateDir: string;
-  /** The `.zshrc` a real interactive zsh reads. */
-  zshrcPath: string;
+  /** The shell startup file a user's actual interactive shell reads — `~/.zshrc`/
+   * `$ZDOTDIR/.zshrc` for zsh, `~/.bashrc` for everything else (see `defaultShellRcPath`,
+   * `src/cli.ts`, issue #40). */
+  shellRcPath: string;
 }
 
 /**
@@ -93,7 +97,7 @@ export async function runDoctorChecks(ctx: DoctorContext): Promise<CheckReport[]
     await guarded("Onboarding pre-seeding", () => checkOnboardingPreseed(ctx.installStateFilePath)),
     await guarded(CONTRACT_STATE_DIRECTORY, () => checkStateDirWritable(ctx.stateDir)),
     await guarded("Legacy state directory", () => checkLegacyStateDir(ctx.legacyStateDir, ctx.stateDir)),
-    await guarded("Shell wiring", () => checkShellWiring(ctx.zshrcPath)),
+    await guarded("Shell wiring", () => checkShellWiring(ctx.shellRcPath)),
     await guarded("Identity isolation", () => checkIdentityIsolation(ctx.stateDir, ctx.claudePort)),
   ];
 }
@@ -121,8 +125,9 @@ const CLAUDE_EXECUTABLE = "claude";
 /**
  * Whether `claude` is directly runnable from `env.PATH` — scanned directory by directory for an
  * executable file named `claude`, never by spawning a process (no `which`, no `command -v`), so
- * this Check costs nothing even if it's run often. `PATH` is `:`-delimited, matching this
- * project's platform scope (CONTEXT.md's Out of Scope: macOS/zsh only).
+ * this Check costs nothing even if it's run often. `PATH` is `:`-delimited on every platform
+ * `ccp` supports — macOS and Linux alike (issue #40, ADR-0012); Windows never reaches this Check
+ * at all, guarded out earlier in `runCli` (`src/cli.ts`).
  */
 async function checkClaudeOnPath(env: NodeJS.ProcessEnv): Promise<CheckOutcome> {
   const dirs = (env.PATH ?? "").split(delimiter).filter((dir) => dir.length > 0);
@@ -264,29 +269,29 @@ async function checkLegacyStateDir(legacyStateDir: string, currentStateDir: stri
 }
 
 /**
- * Detects whether {@link SHELL_WIRING_LINE} is present in `zshrcPath`, printing the exact line to
- * add when it's not. A missing file reads the same as one without the line — nothing to find, not
- * an error — but only `ENOENT` is treated that way: any other failure to read it (e.g. a
+ * Detects whether {@link SHELL_WIRING_LINE} is present in `shellRcPath`, printing the exact line
+ * to add when it's not. A missing file reads the same as one without the line — nothing to find,
+ * not an error — but only `ENOENT` is treated that way: any other failure to read it (e.g. a
  * permission error) is rethrown rather than misreported as "missing", matching
  * `registry.ts`/`rig.ts`/`settings.ts`'s narrow-and-rethrow posture for a real error versus
  * `onboarding.ts`'s broader swallow, which is reserved for cases explicitly argued as best-effort.
  * `runDoctorChecks`'s `guarded` wrapper turns a rethrown error into this Check's own
  * "could not be checked" finding, so nothing here can take the rest of the report down.
  */
-async function checkShellWiring(zshrcPath: string): Promise<CheckOutcome> {
-  return (await shellWiringPresent(zshrcPath))
-    ? { finding: `present in ${zshrcPath}`, ok: true }
-    : { finding: `missing from ${zshrcPath} — add this line:\n  ${SHELL_WIRING_LINE}`, ok: false };
+async function checkShellWiring(shellRcPath: string): Promise<CheckOutcome> {
+  return (await shellWiringPresent(shellRcPath))
+    ? { finding: `present in ${shellRcPath}`, ok: true }
+    : { finding: `missing from ${shellRcPath} — add this line:\n  ${SHELL_WIRING_LINE}`, ok: false };
 }
 
 /**
- * Whether {@link SHELL_WIRING_LINE} is already present in `zshrcPath` — the one predicate this
+ * Whether {@link SHELL_WIRING_LINE} is already present in `shellRcPath` — the one predicate this
  * Check, `setup.ts`'s write/remove, and `ccp setup`'s `--dry-run` preview (`src/cli.ts`) all need,
  * shared here so "present" can never mean something subtly different at one of those call sites
  * than at another.
  */
-export async function shellWiringPresent(zshrcPath: string): Promise<boolean> {
-  return (await readFileOrEmpty(zshrcPath)).includes(SHELL_WIRING_LINE);
+export async function shellWiringPresent(shellRcPath: string): Promise<boolean> {
+  return (await readFileOrEmpty(shellRcPath)).includes(SHELL_WIRING_LINE);
 }
 
 /** Reads `path`, resolving `""` when it doesn't exist rather than throwing — shared with
