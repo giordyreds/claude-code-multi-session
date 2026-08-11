@@ -4,6 +4,7 @@ import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
 import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
 import { ProcessDaemonPort, type DaemonPort } from "./daemon.js";
+import { LEGACY_STATE_DIR_NAME, runDoctorChecks } from "./doctor.js";
 import { isDrifted } from "./drift.js";
 import { seedOnboardingState, type OnboardingSeeder } from "./onboarding.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
@@ -24,7 +25,7 @@ import { shellInitScript } from "./shell-init.js";
 import { packageVersion } from "./version.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  shell-init         Emit the `ccp` shell function, for a shell startup file to `eval`\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history\n\nFlags:\n  --version          Print ccp's own version\n  --help             Print this usage text";
+  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  shell-init         Emit the `ccp` shell function, for a shell startup file to `eval`\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  doctor             Run every Check and report each Contract by name alongside what it found —\n                     reports only, never repairs (see `ccp sync`)\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history\n\nFlags:\n  --version          Print ccp's own version\n  --help             Print this usage text";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
 const RUN_USAGE = "Usage: ccp run <alias> -- <command> [args...]";
@@ -76,6 +77,22 @@ function defaultInstallStateFilePath(): string {
   return join(homedir(), ".claude.json");
 }
 
+/** Where a state directory under the pre-rename name (issue #31) would live — `~/.ccacct`, the
+ * name `defaultStateDir` used before it became `~/.ccp`. `ccp doctor`'s Legacy state directory
+ * Check looks here for detection only; nothing ever reads or moves what it finds. */
+function defaultLegacyStateDir(): string {
+  return join(homedir(), LEGACY_STATE_DIR_NAME);
+}
+
+/** The `.zshrc` a real interactive zsh actually reads: `$ZDOTDIR/.zshrc` when the zsh
+ * dot-directory environment variable is set, `~/.zshrc` otherwise (issue #28's Setup decisions —
+ * the same file Setup will target once it exists). `ccp doctor`'s Shell wiring Check reads this
+ * file; it never writes to it. */
+function defaultZshrcPath(env: NodeJS.ProcessEnv): string {
+  const dotDir = env.ZDOTDIR || homedir();
+  return join(dotDir, ".zshrc");
+}
+
 export interface RunCliOptions {
   /** The shell environment to resolve Binding from. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
@@ -118,6 +135,12 @@ export interface RunCliOptions {
    * filesystem permission errors. Defaults to the real {@link seedOnboardingState}.
    */
   onboardingSeeder?: OnboardingSeeder;
+  /** Test seam: where a state directory under the pre-rename name (issue #31) would live, for
+   * `ccp doctor`'s Legacy state directory Check. Defaults to `~/.ccacct`. */
+  legacyStateDir?: string;
+  /** Test seam: the `.zshrc` `ccp doctor`'s Shell wiring Check reads. Defaults to
+   * `$ZDOTDIR/.zshrc`, or `~/.zshrc` if `$ZDOTDIR` isn't set. */
+  zshrcPath?: string;
 }
 
 /** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
@@ -149,6 +172,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const picker = options.picker ?? new TtyPicker();
   const commandRunner = options.commandRunner ?? runCommand;
   const onboardingSeeder = options.onboardingSeeder ?? seedOnboardingState;
+  const legacyStateDir = options.legacyStateDir ?? defaultLegacyStateDir();
+  const zshrcPath = options.zshrcPath ?? defaultZshrcPath(env);
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -187,6 +212,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       return runReconcile(argv[1], { stateDir, stdout, stderr, claudePort });
     case "sync":
       return runSync({ stateDir, installDir, stdout, stderr });
+    case "doctor":
+      return runDoctor({ env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, zshrcPath, stdout, stderr });
     case "rm":
       return runRm(argv.slice(1), deps);
     default:
@@ -849,4 +876,28 @@ async function syncProfile(alias: string, record: ProfileRecord, installDir: str
     line: changes.length > 0 ? `${alias}: ${changes.join("; ")}` : `${alias}: no changes`,
     skipped: false,
   };
+}
+
+/**
+ * `ccp doctor` (ticket #33): runs every Check that costs no per-Profile process spawn — the
+ * identity Checks, which spawn one process per Profile to compare it against its Expected
+ * identity, follow in a later ticket — and reports each Contract by name alongside what it found
+ * (CONTEXT.md's Check). Reports only: like every Check in this project, it never repairs anything
+ * — that stays with `ccp sync` — and it never writes anything to disk, which is asserted directly
+ * by this command's own tests rather than assumed from {@link runDoctorChecks} being read-only.
+ */
+async function runDoctor(deps: {
+  env: NodeJS.ProcessEnv;
+  claudePort: ClaudePort;
+  stateDir: string;
+  installDir: string;
+  installStateFilePath: string;
+  legacyStateDir: string;
+  zshrcPath: string;
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
+}): Promise<number> {
+  const reports = await runDoctorChecks(deps);
+  deps.stdout(reports.map((report) => `${report.contract}: ${report.finding}`).join("\n"));
+  return 0;
 }

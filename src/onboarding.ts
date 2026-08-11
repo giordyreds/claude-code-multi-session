@@ -86,6 +86,17 @@ export async function seedOnboardingState(installStateFilePath: string, configDi
   return { seeded: true };
 }
 
+/**
+ * Whether {@link seedOnboardingState} would currently find anything to copy from the Default
+ * install's own `.claude.json` — the *source* half of pre-seeding, independent of any particular
+ * Profile's target file. `ccp doctor`'s Onboarding pre-seeding Check (ticket #33) reports this so
+ * a user can tell in advance whether a freshly logged-in Profile's first interactive `claude`
+ * launch will skip the onboarding wizard, without needing an actual Profile to try it on.
+ */
+export async function onboardingSourceReady(installStateFilePath: string): Promise<boolean> {
+  return (await readOnboardingFields(installStateFilePath)) !== undefined;
+}
+
 /** The two fields {@link seedOnboardingState} copies — present and correctly shaped, or not
  * copied at all; there is no partial case. */
 interface OnboardingFields {

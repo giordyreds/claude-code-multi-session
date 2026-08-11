@@ -202,3 +202,43 @@ describe("ClaudeCliPort.login", () => {
     await expect(port.login()).rejects.toThrow(/ENOENT/);
   });
 });
+
+describe("ClaudeCliPort.version", () => {
+  it("invokes `claude --version`", async () => {
+    const capture: { command?: string; args?: string[] } = {};
+    const port = new ClaudeCliPort({
+      run: fakeRun({ stdout: "2.1.224 (Claude Code)\n", stderr: "", exitCode: 0 }, capture),
+    });
+
+    await port.version();
+
+    expect(capture.command).toBe("claude");
+    expect(capture.args).toEqual(["--version"]);
+  });
+
+  it("resolves the trimmed stdout", async () => {
+    const port = new ClaudeCliPort({
+      run: fakeRun({ stdout: "2.1.224 (Claude Code)\n", stderr: "", exitCode: 0 }),
+    });
+
+    await expect(port.version()).resolves.toBe("2.1.224 (Claude Code)");
+  });
+
+  it("throws a diagnostic error when stdout is empty", async () => {
+    const port = new ClaudeCliPort({
+      run: fakeRun({ stdout: "", stderr: "", exitCode: 0 }),
+    });
+
+    await expect(port.version()).rejects.toThrow(/claude --version/i);
+  });
+
+  it("propagates a process-runner rejection (e.g. the claude binary is missing) unchanged", async () => {
+    const port = new ClaudeCliPort({
+      run: async () => {
+        throw new Error("spawn claude ENOENT");
+      },
+    });
+
+    await expect(port.version()).rejects.toThrow(/ENOENT/);
+  });
+});

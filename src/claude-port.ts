@@ -61,6 +61,17 @@ export interface ClaudePort {
    * it (ADR-0001).
    */
   login(configDir?: string): Promise<void>;
+
+  /**
+   * Resolves the version string `claude --version` reports. Not scoped to any Profile — unlike
+   * {@link authStatus}/{@link login}, Claude Code's own version doesn't depend on which
+   * `CLAUDE_CONFIG_DIR` is in effect — so this takes no `configDir` parameter.
+   *
+   * `ccp doctor`'s Claude Code version Check (ticket #33) reads it through this method rather
+   * than spawning `claude` directly, per issue #28: one port every invocation of the `claude`
+   * executable already goes through, never a second one added just for this.
+   */
+  version(): Promise<string>;
 }
 
 async function runProcess(command: string, args: string[], options: { env: NodeJS.ProcessEnv }): Promise<ProcessResult> {
@@ -143,6 +154,19 @@ export class ClaudeCliPort implements ClaudePort {
     if (exitCode !== 0) {
       throw new Error(`'${CLAUDE_COMMAND} auth login' exited with code ${exitCode ?? "null"}.`);
     }
+  }
+
+  async version(): Promise<string> {
+    const result = await this.runProcess(CLAUDE_COMMAND, ["--version"], { env: process.env });
+
+    // No `--json` shape exists for this (unlike `auth status`), so there is nothing to parse —
+    // only whitespace to trim. Judged by output shape, same as `authStatus`: a real failure to
+    // spawn already rejects via `runProcess`'s own `error` handling, not resolves here.
+    const version = result.stdout.trim();
+    if (version.length === 0) {
+      throw new Error(`'${CLAUDE_COMMAND} --version' produced no output: ${summarize(result)}`);
+    }
+    return version;
   }
 }
 

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { seedOnboardingState } from "../src/onboarding.js";
+import { onboardingSourceReady, seedOnboardingState } from "../src/onboarding.js";
 
 describe("seedOnboardingState", () => {
   let installStateFilePath: string;
@@ -116,5 +116,23 @@ describe("seedOnboardingState", () => {
     expect(result.seeded).toBe(false);
     // Left exactly as it was — never overwritten with the Default install's own version.
     expect(await readProfileState()).toEqual({ hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.100" });
+  });
+
+  describe("onboardingSourceReady", () => {
+    it("is true once the Default install has completed onboarding", async () => {
+      await writeInstallState({ hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.221" });
+
+      await expect(onboardingSourceReady(installStateFilePath)).resolves.toBe(true);
+    });
+
+    it("is false when the Default install hasn't completed onboarding itself yet", async () => {
+      await writeInstallState({ hasCompletedOnboarding: false });
+
+      await expect(onboardingSourceReady(installStateFilePath)).resolves.toBe(false);
+    });
+
+    it("is false when the Default install has no '.claude.json' at all", async () => {
+      await expect(onboardingSourceReady(installStateFilePath)).resolves.toBe(false);
+    });
   });
 });

@@ -6,6 +6,7 @@ import { runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
 import type { CommandRunner } from "../src/command-runner.js";
 import type { DaemonPort } from "../src/daemon.js";
+import { SHELL_WIRING_LINE } from "../src/doctor.js";
 import type { Picker, PickerRow } from "../src/picker.js";
 import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity } from "../src/registry.js";
 
@@ -23,7 +24,7 @@ function captureLines(): { stdout: string[]; stderr: string[]; stdoutFn: (line: 
  */
 function fakeClaudePort(
   status: AuthStatus,
-  options?: { loginError?: string },
+  options?: { loginError?: string; version?: string },
 ): ClaudePort & { calls: Array<string | undefined>; loginCalls: Array<string | undefined> } {
   const calls: Array<string | undefined> = [];
   const loginCalls: Array<string | undefined> = [];
@@ -38,6 +39,9 @@ function fakeClaudePort(
       calls.push(configDir);
       return status;
     },
+    async version() {
+      return options?.version ?? "1.0.0 (Claude Code)";
+    },
   };
 }
 
@@ -45,6 +49,9 @@ function throwingClaudePort(message: string): ClaudePort {
   return {
     async login() {},
     async authStatus() {
+      throw new Error(message);
+    },
+    async version() {
       throw new Error(message);
     },
   };
@@ -844,6 +851,9 @@ describe("runCli ls (Drift marking)", () => {
         if (configDir !== undefined) throw new Error(`ls must not live-check a managed Profile (${configDir})`);
         return { loggedIn: false };
       },
+      async version() {
+        return "1.0.0 (Claude Code)";
+      },
     };
 
     const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
@@ -1095,6 +1105,126 @@ describe("runCli sync", () => {
   });
 });
 
+describe("runCli doctor", () => {
+  let stateDir: string;
+  let installDir: string;
+  let legacyStateDir: string;
+  let zshrcPath: string;
+  let installStateFilePath: string;
+
+  beforeEach(async () => {
+    stateDir = join(await mkdtemp(join(tmpdir(), "ccp-cli-doctor-test-")), "ccp");
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-doctor-install-"));
+    const scratch = await mkdtemp(join(tmpdir(), "ccp-cli-doctor-scratch-"));
+    legacyStateDir = join(scratch, "ccacct");
+    zshrcPath = join(scratch, ".zshrc");
+    installStateFilePath = join(scratch, ".claude.json");
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
+    await rm(legacyStateDir, { recursive: true, force: true });
+  });
+
+  function runDoctor(claudePort: ClaudePort = fakeClaudePort({ loggedIn: false })) {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    return runCli(["doctor"], {
+      stateDir,
+      installDir,
+      installStateFilePath,
+      legacyStateDir,
+      zshrcPath,
+      stdout: stdoutFn,
+      stderr: stderrFn,
+      claudePort,
+    }).then((code) => ({ code, stdout, stderr }));
+  }
+
+  it("reports each Contract by name alongside what it found", async () => {
+    const { code, stdout, stderr } = await runDoctor();
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    const report = stdout.join("\n");
+    for (const contract of [
+      "claude on PATH",
+      "Claude Code version",
+      "Default install",
+      "Rig",
+      "Onboarding pre-seeding",
+      "State directory",
+      "Legacy state directory",
+      "Shell wiring",
+    ]) {
+      expect(report).toContain(`${contract}:`);
+    }
+  });
+
+  it("reports the Claude Code version, read through the ClaudePort rather than a direct spawn", async () => {
+    const { stdout } = await runDoctor(fakeClaudePort({ loggedIn: false }, { version: "2.1.224 (Claude Code)" }));
+
+    expect(stdout.join("\n")).toMatch(/Claude Code version: 2\.1\.224 \(Claude Code\)/);
+  });
+
+  it("detects a state directory under the pre-rename name and prints the single move command that resolves it", async () => {
+    await mkdir(legacyStateDir, { recursive: true });
+
+    const { stdout } = await runDoctor();
+
+    expect(stdout.join("\n")).toContain(`Legacy state directory: found at ${legacyStateDir}`);
+    expect(stdout.join("\n")).toContain(`mv ${legacyStateDir} ${stateDir}`);
+    // Detection only — nothing was moved.
+    await expect(stat(legacyStateDir)).resolves.toBeDefined();
+  });
+
+  it("detects missing shell wiring and prints the exact line to add", async () => {
+    const { stdout } = await runDoctor();
+
+    expect(stdout.join("\n")).toContain(`Shell wiring: missing from ${zshrcPath}`);
+    expect(stdout.join("\n")).toContain(SHELL_WIRING_LINE);
+  });
+
+  it("reports shell wiring present once the exact line has been added", async () => {
+    await writeFile(zshrcPath, `# .zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
+
+    const { stdout } = await runDoctor();
+
+    expect(stdout.join("\n")).toContain(`Shell wiring: present in ${zshrcPath}`);
+  });
+
+  it("writes nothing at all, asserted directly rather than assumed", async () => {
+    // Populate every path doctor reads from, so every Check's "found" branch runs too, not just
+    // the absent-state defaults which trivially write nothing.
+    await mkdir(join(installDir, "skills"));
+    await writeFile(join(installDir, "unknown-thing"), "x", "utf8");
+    const installState = JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "1.0.0" });
+    await writeFile(installStateFilePath, installState, "utf8");
+    await mkdir(legacyStateDir, { recursive: true });
+    const zshrcContents = "# .zshrc\n";
+    await writeFile(zshrcPath, zshrcContents, "utf8");
+
+    const { code } = await runDoctor();
+
+    expect(code).toBe(0);
+    // The state directory, never created ahead of time, still doesn't exist.
+    await expect(stat(stateDir)).rejects.toThrow();
+    // Neither file doctor only ever reads was modified.
+    await expect(readFile(installStateFilePath, "utf8")).resolves.toBe(installState);
+    await expect(readFile(zshrcPath, "utf8")).resolves.toBe(zshrcContents);
+    // The legacy directory is untouched — still there, never moved.
+    await expect(stat(legacyStateDir)).resolves.toBeDefined();
+  });
+
+  it("lists 'doctor' in the usage text", async () => {
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+
+    await runCli([], { stdout: stdoutFn, stderr: stderrFn });
+
+    expect(stdout.join("\n")).toMatch(/doctor/);
+  });
+});
+
 describe("runCli use (interactive picker, no Alias given)", () => {
   let stateDir: string;
   let installDir: string;
@@ -1119,6 +1249,9 @@ describe("runCli use (interactive picker, no Alias given)", () => {
         if (configDir === personalDir) return { loggedIn: false };
         throw new Error(`unexpected configDir '${configDir}'`);
       },
+      async version() {
+        return "1.0.0 (Claude Code)";
+      },
     };
     const picker = fakePicker((rows) => rows[0]?.alias);
 
@@ -1140,6 +1273,9 @@ describe("runCli use (interactive picker, no Alias given)", () => {
       async authStatus(configDir) {
         await delay(40);
         return { loggedIn: true, email: `${configDir === workDir ? "work" : "personal"}@example.com`, orgName: "Org" };
+      },
+      async version() {
+        return "1.0.0 (Claude Code)";
       },
     };
 
