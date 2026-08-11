@@ -35,12 +35,14 @@ personal tool by the same maintainer (`scripts/build-binaries.sh`,
 package registry.
 
 The release pipeline builds all seven of `bun build --compile`'s targets (macOS, Linux, and
-Windows, across architectures and libc variants), even though `ccp` itself only functions on
-macOS + zsh today — `setup.ts` writes to `.zshrc`, and several Checks branch on
-`process.platform === "darwin"`. This is deliberate, not an oversight: it costs nothing extra in
-CI, and it means a future decision to support another platform is a `src/` change alone, with the
-release pipeline already in place to publish it. The non-macOS binaries simply have nothing to
-install onto right now, and the README says so.
+Windows, across architectures and libc variants), even though `ccp` itself only functioned on
+macOS + zsh at the time this ADR was written — `setup.ts` wrote unconditionally to `.zshrc`. This
+is deliberate, not an oversight: it costs nothing extra in CI, and it means a future decision to
+support another platform is a `src/` change alone, with the release pipeline already in place to
+publish it. The non-macOS binaries simply had nothing to install onto at the time, and the README
+said so. (That future decision arrived for Linux in
+[ADR-0012](./0012-linux-is-supported-detection-is-universal-windows-is-deferred.md) — exactly the
+`src/`-change-alone shape anticipated here; Windows remains deferred, tracked as issue #41.)
 
 ## Considered Options
 

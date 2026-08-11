@@ -6,7 +6,11 @@ personal Pro subscription in another — without logging in and out to switch.
 
 It never touches your existing `~/.claude` installation, never reads or stores
 credentials, and shares your skills, plugins, hooks and commands across every identity
-you add. macOS + zsh only; built as a personal tool, not published.
+you add. macOS and Linux, bash or zsh; built as a personal tool, not published. Windows
+isn't supported yet (tracked as
+[issue #41](https://github.com/giordyreds/claude-code-multi-session/issues/41)) — every
+`ccp` subcommand fails fast with a clear message on that platform instead of a confusing
+path or permissions error.
 
 ## Concepts
 
@@ -72,9 +76,14 @@ it's what a private repo does to an unauthenticated request.)
 | --- | --- |
 | macOS, Apple Silicon | `darwin-arm64` |
 | macOS, Intel | `darwin-x64` |
+| Linux, x64 | `linux-x64` |
+| Linux, arm64 | `linux-arm64` |
 
-`ccp` itself only supports macOS + zsh (see [Scope](#scope)); the release pipeline also
-builds Linux and Windows binaries, but there's nothing for them to install onto today.
+`ccp` itself supports macOS and Linux, bash or zsh (see [Scope](#scope)); the release
+pipeline also builds musl variants of the Linux binaries (for Alpine-style distros) and
+Windows binaries, but Windows support is explicitly deferred — see
+[issue #41](https://github.com/giordyreds/claude-code-multi-session/issues/41) — so there's
+nothing for that asset to install onto yet.
 
 Then run Setup:
 
@@ -83,8 +92,9 @@ ccp setup
 ```
 
 **Setup** adds the `ccp` shell function to the interactive startup file your shell
-actually reads — `$ZDOTDIR/.zshrc` if you use a managed dotfile setup, `~/.zshrc`
-otherwise — by evaluating what `ccp shell-init` prints, rather than `source`-ing
+actually reads, detected from `$SHELL` — `$ZDOTDIR/.zshrc` (or `~/.zshrc`) for zsh,
+`~/.bashrc` for bash or anything else (including an unset `$SHELL`) — by evaluating what
+`ccp shell-init` prints, rather than `source`-ing
 `shell/ccp.sh` by an absolute path. An absolute path can move — the binary gets replaced,
 reinstalled somewhere else, or removed — while the emitted line works unchanged wherever
 `ccp` ends up, and is a no-op — no output, exit status 0 — if it's removed entirely, since
@@ -199,6 +209,12 @@ filesystem deletion, regardless of what you remove here.
 
 ## Scope
 
+- Supported platforms: macOS and Linux, with bash or zsh as your login shell — detected
+  from `$SHELL`, never assumed from `process.platform` (see
+  [ADR-0012](./docs/adr/0012-linux-is-supported-detection-is-universal-windows-is-deferred.md)).
+  Windows isn't supported yet: every `ccp` subcommand fails fast with a clear message
+  instead of running, so nothing is left half-configured; tracked separately as
+  [issue #41](https://github.com/giordyreds/claude-code-multi-session/issues/41).
 - No liveness checking — reports stored login state, honestly labeled as such.
 - No automatic login — every browser-opening step is explicit.
 - No migration of your existing `~/.claude` install; unbound shells keep using it
@@ -207,7 +223,8 @@ filesystem deletion, regardless of what you remove here.
   that reads or writes credential material — every login is delegated to Claude Code
   itself.
 
-Full rationale and out-of-scope list in the [PRD](https://github.com/giordyreds/claude-code-multi-session/issues/14).
+Full rationale and out-of-scope list in the [PRD](https://github.com/giordyreds/claude-code-multi-session/issues/14)
+and the [Linux-support PRD](https://github.com/giordyreds/claude-code-multi-session/issues/40).
 
 ## Releases
 
