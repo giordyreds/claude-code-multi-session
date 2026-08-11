@@ -44,7 +44,7 @@ describe("ccp.sh prompt indicator", () => {
       source ${JSON.stringify(ccpShPath)}
       eval "printf '%s' \\"$PS1\\""
     `,
-      { CLAUDE_CONFIG_DIR: "/tmp/ccacct/profiles/work" },
+      { CLAUDE_CONFIG_DIR: "/tmp/ccp/profiles/work" },
     );
 
     expect(stdout).toContain("[work] ");
@@ -56,7 +56,7 @@ describe("ccp.sh prompt indicator", () => {
       PS1="myprompt$ "
       source ${JSON.stringify(ccpShPath)}
       before=$(eval "printf '%s' \\"$PS1\\"")
-      export CLAUDE_CONFIG_DIR=/tmp/ccacct/profiles/personal
+      export CLAUDE_CONFIG_DIR=/tmp/ccp/profiles/personal
       after=$(eval "printf '%s' \\"$PS1\\"")
       printf 'BEFORE:%s\\nAFTER:%s\\n' "$before" "$after"
     `);

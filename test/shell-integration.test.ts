@@ -13,7 +13,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
  * `claude` executable stands in for the real one (ADR-0005: this project never spawns it in
  * tests), driven by env vars this test controls per case.
  *
- * `CCACCT_HOME` points the real CLI's registry (ADR-0006) at a temp directory rather than a real
+ * `CCP_HOME` points the real CLI's registry (ADR-0006) at a temp directory rather than a real
  * `$HOME` (ADR-0007's amendment). Aliases are registered the same way a real user would, via
  * `ccp add` against the real binary, rather than by hand-writing `registry.json` — this is the
  * one test that can afford to exercise the full `add` → `use` path end to end.
@@ -73,7 +73,7 @@ describe.skipIf(!zshAvailable)("ccp shell function (zsh integration)", () => {
       encoding: "utf8",
       env: {
         PATH: `${binDir}:${process.env.PATH}`,
-        CCACCT_HOME: profilesRoot,
+        CCP_HOME: profilesRoot,
         FAKE_CLAUDE_RESPONSE: fakeClaudeResponse,
       },
     });

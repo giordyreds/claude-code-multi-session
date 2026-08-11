@@ -47,13 +47,13 @@ const BASE_SETTINGS_FILE_NAME = "settings.json";
 const OVERRIDE_SETTINGS_FILE_NAME = "settings.override.json";
 
 /** The tool's own state directory: holds the Profile registry and every managed Profile's
- * isolated config directory. Overridable via `CCACCT_HOME` so tests — including the zsh
+ * isolated config directory. Overridable via `CCP_HOME` so tests — including the zsh
  * integration test, which spawns the real built binary rather than calling {@link runCli}
  * directly — never touch a real `$HOME`. */
 function defaultStateDir(env: NodeJS.ProcessEnv): string {
-  const override = env.CCACCT_HOME;
+  const override = env.CCP_HOME;
   if (override) return resolvePath(override);
-  return join(homedir(), ".ccacct");
+  return join(homedir(), ".ccp");
 }
 
 /** The Default install's configuration directory — the source of the Rig shared into every
@@ -87,7 +87,7 @@ export interface RunCliOptions {
    */
   claudePort?: ClaudePort;
   /** Test seam: the tool's own state directory, holding the Profile registry and every managed
-   * Profile's isolated config directory. Defaults to `~/.ccacct`, or `$CCACCT_HOME` if set. */
+   * Profile's isolated config directory. Defaults to `~/.ccp`, or `$CCP_HOME` if set. */
   stateDir?: string;
   /** Test seam: the Default install's configuration directory — the source of the Rig shared
    * into every newly added Profile (ADR-0007). Defaults to `~/.claude`. */
