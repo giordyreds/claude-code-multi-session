@@ -1,12 +1,12 @@
 /**
- * Refuses to build on a Node older than the range `package.json` declares, which is how an
- * unsupported runtime fails at install time rather than later, from inside `ccp`.
+ * Refuses to build on a Node older than the range `package.json` declares.
  *
- * `engines` alone does not do that: npm treats a mismatch as a warning unless the *installing*
- * user has turned `engine-strict` on, and nothing a package ships can change that — verified
- * against npm 11.17, including from a `.npmrc` inside the package. So the refusal lives in the
- * install-time build step, where a non-zero exit is an install that did not happen rather than a
- * warning nobody reads.
+ * Per ADR-0011, `ccp` ships as a standalone compiled binary — the end user installing a release
+ * needs no Node at all, so this gate no longer guards installation (that was ADR-0009's model;
+ * `engines` alone never enforced it, since npm treats a mismatch as a warning unless the
+ * *installing* user has turned `engine-strict` on). What it still guards is *building* `ccp` from
+ * source — contributors and the release pipeline both run `npm run build`, and this is what makes
+ * an unsupported Node fail that step outright rather than produce a broken build silently.
  *
  * This is deliberately not a **Check** in CONTEXT.md's sense: it verifies nothing about Claude
  * Code, runs at build time rather than at runtime, and refuses rather than reports.

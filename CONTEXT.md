@@ -74,8 +74,8 @@ The one-time act of making this tool available to new shells — adding the `ccp
 function to the shell startup file, then verifying the machine can run the tool. Distinct
 from Default install, which is Claude Code's own configuration and is neither created nor
 managed here: Setup wires up `ccp`, never Claude Code. Also distinct from *installing the
-package*, the earlier and separate act of putting the `ccp` command on `PATH` — that word
-stays free for what npm does, and never names this.
+binary*, the earlier and separate act of putting the `ccp` command on `PATH` — that word
+stays free for whatever does that, and never names this.
 _Avoid_: install, installation, bootstrap, provisioning, init
 
 ### Dependence on Claude Code

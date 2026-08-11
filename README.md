@@ -21,8 +21,8 @@ you add. macOS + zsh only; built as a personal tool, not published.
   as, typically because someone logged in directly while a shell was bound to it.
 - **Setup** — the one-time act (`ccp setup`) of wiring the `ccp` shell function into a new
   shell and verifying the machine can run the tool at all. Distinct from *installing the
-  package*, the separate, earlier act of putting the `ccp` command on `PATH` — that's npm's
-  job, not `ccp`'s.
+  binary*, the separate, earlier act of putting the `ccp` command on `PATH` — that word
+  stays free for whichever of those puts it there, and never names this.
 - **Contract** — a behaviour of Claude Code that `ccp` depends on but doesn't control (the
   shape of its identity output, the isolation `CLAUDE_CONFIG_DIR` provides, and so on).
   Anthropic never documented these, so a Contract is verified by observation, never assumed
@@ -36,29 +36,44 @@ recorded as ADRs in [`docs/adr/`](./docs/adr/).
 
 ## Install
 
+Each [release](https://github.com/giordyreds/claude-code-multi-session/releases) ships a
+standalone `ccp` executable with the JavaScript runtime baked in — no Node.js, no
+`npm install`. Grab the asset for your platform and put it on your `PATH`:
+
 ```sh
-npm i -g github:giordyreds/claude-code-multi-session#semver:^1.0.0
+# macOS (Apple Silicon) — swap the slug for your platform, and vX.Y.Z for the release
+curl -fsSL -o ccp.tar.gz \
+  https://github.com/giordyreds/claude-code-multi-session/releases/download/vX.Y.Z/ccp-X.Y.Z-darwin-arm64.tar.gz
+tar -xzf ccp.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+| Platform | Asset slug |
+| --- | --- |
+| macOS, Apple Silicon | `darwin-arm64` |
+| macOS, Intel | `darwin-x64` |
+
+`ccp` itself only supports macOS + zsh (see [Scope](#scope)); the release pipeline also
+builds Linux and Windows binaries, but there's nothing for them to install onto today.
+
+Then run Setup:
+
+```sh
 ccp setup
 ```
 
-Nothing is published to a package registry — the first line installs directly from this
-GitHub repository. No path specific to your machine appears anywhere in it, and it never
-goes stale: it resolves against release tags (see [Releases](#releases) below), not a
-branch, so a colleague can paste it verbatim next year and still get the newest compatible
-release.
-
-The second line is **Setup**. It adds the `ccp` shell function to the interactive startup
-file your shell actually reads — `$ZDOTDIR/.zshrc` if you use a managed dotfile setup,
-`~/.zshrc` otherwise — by evaluating what `ccp shell-init` prints, rather than `source`-ing
-`shell/ccp.sh` by an absolute path. An absolute path, under a Node version manager, is
-scoped per Node version and can silently vanish on the next upgrade (see
-[ADR-0004](./docs/adr/0004-shell-function-not-tui.md)'s Amendment 1); the emitted line
-works unchanged on every machine, survives Node upgrades, and is a no-op — no output, exit
-status 0 — if the package is ever removed, since it's guarded on `ccp` actually being on
-`PATH`. Setup then verifies the machine can run the tool at all, using the same Checks
-`ccp doctor` exposes, so a problem surfaces once, here, instead of later as an unexplained
-failure. Run it again any time — a second run changes nothing — and add `--dry-run` to see
-the line it would add without writing it.
+**Setup** adds the `ccp` shell function to the interactive startup file your shell
+actually reads — `$ZDOTDIR/.zshrc` if you use a managed dotfile setup, `~/.zshrc`
+otherwise — by evaluating what `ccp shell-init` prints, rather than `source`-ing
+`shell/ccp.sh` by an absolute path. An absolute path can move — the binary gets replaced,
+reinstalled somewhere else, or removed — while the emitted line works unchanged wherever
+`ccp` ends up, and is a no-op — no output, exit status 0 — if it's removed entirely, since
+it's guarded on `ccp` actually being on `PATH` (see
+[ADR-0004](./docs/adr/0004-shell-function-not-tui.md)'s Amendment 1). Setup then verifies
+the machine can run the tool at all, using the same Checks `ccp doctor` exposes, so a
+problem surfaces once, here, instead of later as an unexplained failure. Run it again any
+time — a second run changes nothing — and add `--dry-run` to see the line it would add
+without writing it.
 
 Setup adds this line:
 
@@ -69,15 +84,12 @@ if command -v ccp >/dev/null 2>&1; then eval "$(command ccp shell-init)"; fi
 It also adds a `[alias]` segment to your prompt showing which Profile the shell is bound
 to (`[(default)]` when unbound) — see `shell/ccp.sh` for how it hooks `PS1`.
 
-**Pinning a version.** The install line above always resolves the newest release
-compatible with `^1.0.0`. To stay on a known-good combination with an older Claude Code
-instead — the entire backward-compatibility mechanism this project offers (see
-[ADR-0010](./docs/adr/0010-compatibility-by-observation-not-version-matrix.md)) — install
-an exact release tag:
-
-```sh
-npm i -g github:giordyreds/claude-code-multi-session#v1.2.0
-```
+**Pinning a version.** To stay on a known-good combination with an older Claude Code
+instead of always grabbing the latest release — the entire backward-compatibility
+mechanism this project offers (see
+[ADR-0010](./docs/adr/0010-compatibility-by-observation-not-version-matrix.md)) —
+download the asset from that specific release's tag instead of the newest one; the URL
+above already names an exact tag (`vX.Y.Z`), so pinning is just not updating it.
 
 ## Usage
 
@@ -148,7 +160,7 @@ session either way.
 
 ```sh
 ccp teardown
-npm uninstall -g claude-code-multi-session
+sudo rm "$(command -v ccp)"
 ```
 
 `ccp teardown` is Setup's inverse: it removes only the shell wiring line `ccp setup`
@@ -157,9 +169,9 @@ Setup was never run at all. It then reports what it deliberately leaves behind �
 Profiles, still under `ccp`'s state directory — and the command that removes one
 (`ccp rm <alias> --yes`), since destroying them as a side effect of removing a shell
 helper would throw away conversation history and project state you may still want.
-Uninstalling the package removes the `ccp` command itself; the guarded shell line left
-behind by Setup becomes a harmless no-op — no output, exit status 0 — rather than an error
-on your next shell start.
+Removing the binary removes the `ccp` command itself; the guarded shell line left behind
+by Setup becomes a harmless no-op — no output, exit status 0 — rather than an error on your
+next shell start.
 
 Neither step touches credential material either way — see [Scope](#scope) for why `ccp`
 never has a code path that could. It lives in the system keychain and survives any
@@ -180,25 +192,29 @@ Full rationale and out-of-scope list in the [PRD](https://github.com/giordyreds/
 ## Releases
 
 Work happens on `development`; releases are cut from `main`, `ccp`'s stable branch, and
-tagged there — never from `development` directly, so the install line in
-[Install](#install) never hands someone a half-finished tree. The ritual:
+tagged there — never from `development` directly, so the binaries a tag publishes are
+never built from a half-finished tree. The ritual:
 
 1. Bump `version` in `package.json`.
 2. Merge `development` into `main`.
 3. Tag the merge commit `vX.Y.Z`.
 4. Push `main` and the tag.
 
-This is written down because it's easy to skip silently: the install line resolves
-against release tags, so a release that's never tagged makes it silently resolve to
-nothing useful, for everybody, with no error that points at the cause (see
-[ADR-0009](./docs/adr/0009-install-from-github-via-npm.md)).
+Pushing the tag is what matters: it's what
+[`.github/workflows/release.yml`](./.github/workflows/release.yml) watches for, and that
+workflow is the only thing that builds and publishes the binaries in
+[Install](#install). This is written down because it's easy to skip silently: a release
+that's never tagged builds and publishes nothing, for everybody, with no error that points
+at the cause (see [ADR-0011](./docs/adr/0011-distribute-as-compiled-binaries-via-github-releases.md)).
 
 ## Development
 
 ```sh
+npm install
 npm run typecheck
-npm test        # vitest
-npm run build
+npm test              # vitest
+npm run build          # tsc -> dist/, for running ccp from a checkout
+npm run build:binaries # bun build --compile -> bin-dist/, the same binaries a release publishes
 ```
 
 Tests drive the CLI through its single entry point (`runCli` in `src/cli.ts`) with

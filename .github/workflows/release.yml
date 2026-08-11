@@ -1,0 +1,79 @@
+name: Release
+
+# Pushing a `v*` tag publishes standalone executables as GitHub Release assets.
+# Running this workflow manually builds the same binaries and uploads them as a (login-only,
+# 90-day) Actions artifact instead — useful for testing a build without cutting a release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Deps come from npm (not `bun install`) so the bundler resolves exactly the tree
+      # package-lock.json pins and the test suite runs against.
+      - run: npm ci
+
+      # Only the typecheck and unit tests gate a release; there's no integration suite here that
+      # needs a real Claude Code install to run against.
+      - run: npm run typecheck
+      - run: npm test
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Resolve version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=$(node -p "require('./package.json').version")-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build binaries
+        run: ./scripts/build-binaries.sh "$VERSION"
+
+      # Cross-compiled output is never executed at build time, so run the one target that matches
+      # this runner. Checks both that the binary loads at all (no bad interpreter, missing shared
+      # library, or corrupt bytecode) and that --define stamped the right version into it.
+      - name: Smoke-test the linux-x64 binary
+        run: |
+          tar -xzf "bin-dist/ccp-${VERSION}-linux-x64.tar.gz" -C /tmp
+          reported="$(/tmp/ccp --version)"
+          echo "reported version: $reported"
+          if [ "$reported" != "$VERSION" ]; then
+            echo "::error::binary reports '$reported', expected '$VERSION'"
+            exit 1
+          fi
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            bin-dist/*.tar.gz bin-dist/*.zip bin-dist/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: Upload build for inspection
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccp-${{ env.VERSION }}
+          path: bin-dist/
