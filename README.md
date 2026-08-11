@@ -54,8 +54,8 @@ tar -xzf ccp-*-darwin-arm64.tar.gz
 sudo mv ccp /usr/local/bin/
 ```
 
-**If this repository is ever made public**, a plain `curl` works exactly like
-`parallel-issue-solver`'s and needs nothing but a shell:
+**If this repository is ever made public**, a plain `curl` works and needs nothing but a
+shell:
 
 ```sh
 # macOS (Apple Silicon) — swap the slug for your platform, and vX.Y.Z for the release
