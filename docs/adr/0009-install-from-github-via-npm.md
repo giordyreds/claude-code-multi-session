@@ -1,6 +1,16 @@
 ---
-status: accepted
+status: superseded by 0011-distribute-as-compiled-binaries-via-github-releases.md
 ---
+
+> **Superseded.** The install mechanism this ADR chose — `npm i -g github:...` — turned out to be
+> broken in a way this repository cannot fix: npm's own git-dependency install path does not
+> install the package's dependencies before running its `prepare`/build script, verified against
+> npm 11.17.0. See
+> [ADR-0011](./0011-distribute-as-compiled-binaries-via-github-releases.md) for the replacement
+> (a standalone compiled binary attached to GitHub Releases) and the verification that ruled out a
+> `package.json` fix. The reasoning below about *why git-only, semver-tagged distribution* — as
+> opposed to a registry or a package-manager tap — is unaffected and still holds; only the
+> mechanism for getting the artifact onto the user's machine changed.
 
 # `ccp` is installed from the GitHub repository via npm; nothing is published
 

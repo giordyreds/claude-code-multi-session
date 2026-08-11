@@ -1,5 +1,7 @@
 node_modules/
 dist/
+bin-dist/
+*.bun-build
 *.log
 # parallel-solver: prefetched tickets, logs, and worktree sandboxes
 .parallel-solver*
