@@ -29,9 +29,9 @@ repository.
 **`ccp` now ships as a standalone executable — the JavaScript runtime compiled in — attached to
 GitHub Releases**, built with `bun build --compile` from `src/bin.ts`. Installing it is
 downloading a file and putting it on `PATH`; nothing is built, and nothing is installed, on the
-machine that runs it. This mirrors the release pipeline already in production use for
-`parallel-issue-solver` (`scripts/build-binaries.sh`, `.github/workflows/release.yml`) — a sibling
-personal tool by the same maintainer, solving the identical problem: git-only distribution with no
+machine that runs it. This mirrors a release pipeline already in production use on a sibling
+personal tool by the same maintainer (`scripts/build-binaries.sh`,
+`.github/workflows/release.yml`), solving the identical problem: git-only distribution with no
 package registry.
 
 The release pipeline builds all seven of `bun build --compile`'s targets (macOS, Linux, and
