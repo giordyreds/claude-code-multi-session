@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -1337,6 +1337,331 @@ describe("runCli doctor", () => {
     await runCli([], { stdout: stdoutFn, stderr: stderrFn });
 
     expect(stdout.join("\n")).toMatch(/doctor/);
+  });
+});
+
+describe("runCli setup (issue #35)", () => {
+  let stateDir: string;
+  let installDir: string;
+  let legacyStateDir: string;
+  let zshrcPath: string;
+  let installStateFilePath: string;
+
+  beforeEach(async () => {
+    stateDir = join(await mkdtemp(join(tmpdir(), "ccp-cli-setup-test-")), "ccp");
+    installDir = await mkdtemp(join(tmpdir(), "ccp-cli-setup-install-"));
+    const scratch = await mkdtemp(join(tmpdir(), "ccp-cli-setup-scratch-"));
+    legacyStateDir = join(scratch, "ccacct");
+    zshrcPath = join(scratch, ".zshrc");
+    installStateFilePath = join(scratch, ".claude.json");
+    // Every Check but the two fatal ones ("claude on PATH", "State directory") starts dirty by
+    // default in this suite's fixtures (no onboarding state, no Rig contents, an absent legacy
+    // directory reports clean though) — deliberate, so a passing exit code here is provably about
+    // the fatal/non-fatal rule and not an accident of every Check happening to be clean.
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(installDir, { recursive: true, force: true });
+    await rm(legacyStateDir, { recursive: true, force: true });
+  });
+
+  /** `claude` on `PATH` by default — most cases here are about the *shell wiring* write, not the
+   * fatal/non-fatal rule, which gets its own describe block below with `PATH` deliberately empty
+   * or non-empty as each case needs. */
+  function binDirOnPath(): Promise<string> {
+    return mkdtemp(join(tmpdir(), "ccp-cli-setup-bin-")).then(async (binDir) => {
+      const claudePath = join(binDir, "claude");
+      await writeFile(claudePath, "#!/bin/sh\n", "utf8");
+      await chmod(claudePath, 0o755);
+      return binDir;
+    });
+  }
+
+  function runSetup(args: string[] = [], overrides: { env?: NodeJS.ProcessEnv; claudePort?: ClaudePort } = {}) {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    return runCli(["setup", ...args], {
+      env: overrides.env ?? { PATH: "" },
+      stateDir,
+      installDir,
+      installStateFilePath,
+      legacyStateDir,
+      zshrcPath,
+      claudePort: overrides.claudePort ?? fakeClaudePort({ loggedIn: false }),
+      stdout: stdoutFn,
+      stderr: stderrFn,
+    }).then((code) => ({ code, stdout, stderr }));
+  }
+
+  it("writes the guarded line to a file that lacks it, and reports the file and the exact line", async () => {
+    await writeFile(zshrcPath, "# my zshrc\n", "utf8");
+    const binDir = await binDirOnPath();
+
+    const { code, stdout } = await runSetup([], { env: { PATH: binDir } });
+
+    expect(code).toBe(0);
+    expect(await readFile(zshrcPath, "utf8")).toBe(`# my zshrc\n${SHELL_WIRING_LINE}\n`);
+    const report = stdout.join("\n");
+    expect(report).toContain(zshrcPath);
+    expect(report).toContain(SHELL_WIRING_LINE);
+  });
+
+  it("writes nothing to the file on a second run — idempotent", async () => {
+    const binDir = await binDirOnPath();
+    await runSetup([], { env: { PATH: binDir } });
+    const afterFirstRun = await readFile(zshrcPath, "utf8");
+
+    const { code, stdout } = await runSetup([], { env: { PATH: binDir } });
+
+    expect(code).toBe(0);
+    expect(await readFile(zshrcPath, "utf8")).toBe(afterFirstRun);
+    expect(stdout.join("\n")).toMatch(/already contains the shell wiring line/i);
+  });
+
+  it("honours the zsh dot-directory environment variable in preference to the home directory", async () => {
+    const zdotdir = await mkdtemp(join(tmpdir(), "ccp-cli-setup-zdotdir-"));
+    const binDir = await binDirOnPath();
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+
+    try {
+      const code = await runCli(["setup"], {
+        env: { PATH: binDir, ZDOTDIR: zdotdir },
+        stateDir,
+        installDir,
+        installStateFilePath,
+        legacyStateDir,
+        claudePort: fakeClaudePort({ loggedIn: false }),
+        stdout: stdoutFn,
+        stderr: stderrFn,
+      });
+
+      expect(code).toBe(0);
+      expect(await readFile(join(zdotdir, ".zshrc"), "utf8")).toContain(SHELL_WIRING_LINE);
+      expect(stdout.join("\n")).toContain(join(zdotdir, ".zshrc"));
+      expect(stderr).toEqual([]);
+    } finally {
+      await rm(zdotdir, { recursive: true, force: true });
+    }
+  });
+
+  it("dry run prints the line instead of writing it", async () => {
+    const { code, stdout } = await runSetup(["--dry-run"]);
+
+    expect(code).toBe(0);
+    expect(stdout.join("\n")).toContain(SHELL_WIRING_LINE);
+    await expect(stat(zshrcPath)).rejects.toThrow();
+  });
+
+  it("dry run reports there is nothing to add when the line is already present", async () => {
+    await writeFile(zshrcPath, `# my zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
+    const before = await readFile(zshrcPath, "utf8");
+
+    const { code, stdout } = await runSetup(["--dry-run"]);
+
+    expect(code).toBe(0);
+    expect(stdout.join("\n")).toMatch(/already contains/i);
+    expect(await readFile(zshrcPath, "utf8")).toBe(before);
+  });
+
+  it("runs the same Checks `ccp doctor` exposes and reports every Contract by name", async () => {
+    const binDir = await binDirOnPath();
+
+    const { stdout } = await runSetup([], { env: { PATH: binDir } });
+
+    const report = stdout.join("\n");
+    for (const contract of [
+      "claude on PATH",
+      "Claude Code version",
+      "Default install",
+      "Rig",
+      "Onboarding pre-seeding",
+      "State directory",
+      "Legacy state directory",
+      "Shell wiring",
+      "Identity isolation",
+    ]) {
+      expect(report).toContain(`${contract}:`);
+    }
+    // Shell wiring now reports present, since the write above ran before the Checks did.
+    expect(report).toContain(`Shell wiring: present in ${zshrcPath}`);
+  });
+
+  it("ends by naming the next command to run, on success", async () => {
+    const binDir = await binDirOnPath();
+
+    const { stdout } = await runSetup([], { env: { PATH: binDir } });
+
+    expect(stdout.join("\n")).toMatch(/ccp add/);
+  });
+
+  describe("the fatal/non-fatal rule", () => {
+    it("fails when `claude` is not on PATH", async () => {
+      const { code, stdout } = await runSetup([], { env: { PATH: "" } });
+
+      expect(code).toBe(1);
+      expect(stdout.join("\n")).toContain("claude on PATH: not found");
+      // A missing `claude` is fatal, so the *success* next-command line never appears — but Setup
+      // still ends by naming a next command either way (this ticket's own acceptance criteria):
+      // fix the problem, then re-run `ccp setup`.
+      expect(stdout.join("\n")).not.toMatch(/ccp add/);
+      expect(stdout.join("\n")).toMatch(/Next:.*re-run 'ccp setup'/);
+    });
+
+    it("fails when the state directory is not writable", async () => {
+      const binDir = await binDirOnPath();
+      const unwritableParent = await mkdtemp(join(tmpdir(), "ccp-cli-setup-unwritable-"));
+      const unwritableStateDir = join(unwritableParent, "ccp");
+      await chmod(unwritableParent, 0o500);
+
+      try {
+        const { stdout, stdoutFn, stderrFn } = captureLines();
+        const code = await runCli(["setup"], {
+          env: { PATH: binDir },
+          stateDir: unwritableStateDir,
+          installDir,
+          installStateFilePath,
+          legacyStateDir,
+          zshrcPath,
+          claudePort: fakeClaudePort({ loggedIn: false }),
+          stdout: stdoutFn,
+          stderr: stderrFn,
+        });
+
+        expect(code).toBe(1);
+        expect(stdout.join("\n")).toMatch(/State directory: .*not writable/i);
+        expect(stdout.join("\n")).toMatch(/Next:.*re-run 'ccp setup'/);
+      } finally {
+        await chmod(unwritableParent, 0o700);
+        await rm(unwritableParent, { recursive: true, force: true });
+      }
+    });
+
+    it("succeeds despite an absent Default install — reported, never fatal", async () => {
+      const binDir = await binDirOnPath();
+      const missingInstallDir = join(installDir, "does-not-exist");
+
+      const { stdout, stdoutFn, stderrFn } = captureLines();
+      const code = await runCli(["setup"], {
+        env: { PATH: binDir },
+        stateDir,
+        installDir: missingInstallDir,
+        installStateFilePath,
+        legacyStateDir,
+        zshrcPath,
+        claudePort: fakeClaudePort({ loggedIn: false }),
+        stdout: stdoutFn,
+        stderr: stderrFn,
+      });
+
+      expect(code).toBe(0);
+      expect(stdout.join("\n")).toMatch(/Default install: not found/i);
+      expect(stdout.join("\n")).toMatch(/ccp add/);
+    });
+
+    it("succeeds despite the Claude Code version failing to resolve — an unrecognised identity output shape is reported, never fatal", async () => {
+      const binDir = await binDirOnPath();
+      const throwingPort: ClaudePort = {
+        async login() {},
+        async authStatus() {
+          return { loggedIn: false };
+        },
+        async version() {
+          throw new Error("unexpected --version output shape");
+        },
+      };
+
+      const { code, stdout } = await runSetup([], { env: { PATH: binDir }, claudePort: throwingPort });
+
+      expect(code).toBe(0);
+      expect(stdout.join("\n")).toMatch(/Claude Code version: could not be determined/i);
+      expect(stdout.join("\n")).toMatch(/ccp add/);
+    });
+  });
+
+  it("lists 'setup' and the '--dry-run' flag in the usage text", async () => {
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+
+    await runCli([], { stdout: stdoutFn, stderr: stderrFn });
+
+    expect(stdout.join("\n")).toMatch(/setup/);
+    expect(stdout.join("\n")).toMatch(/--dry-run/);
+  });
+});
+
+describe("runCli teardown (issue #35)", () => {
+  let stateDir: string;
+  let scratch: string;
+  let zshrcPath: string;
+
+  beforeEach(async () => {
+    stateDir = join(await mkdtemp(join(tmpdir(), "ccp-cli-teardown-test-")), "ccp");
+    scratch = await mkdtemp(join(tmpdir(), "ccp-cli-teardown-scratch-"));
+    zshrcPath = join(scratch, ".zshrc");
+  });
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true });
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  function runTeardown() {
+    const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
+    return runCli(["teardown"], { stateDir, zshrcPath, stdout: stdoutFn, stderr: stderrFn }).then((code) => ({
+      code,
+      stdout,
+      stderr,
+    }));
+  }
+
+  it("removes the line Setup added, leaving unrelated content in the file untouched", async () => {
+    await writeFile(zshrcPath, `# before\nexport FOO=bar\n${SHELL_WIRING_LINE}\n# after\n`, "utf8");
+
+    const { code, stdout } = await runTeardown();
+
+    expect(code).toBe(0);
+    expect(await readFile(zshrcPath, "utf8")).toBe("# before\nexport FOO=bar\n# after\n");
+    expect(stdout.join("\n")).toMatch(/removed/i);
+  });
+
+  it("is safe to run when no line is present", async () => {
+    const contents = "# my zshrc, never wired up\n";
+    await writeFile(zshrcPath, contents, "utf8");
+
+    const { code, stdout } = await runTeardown();
+
+    expect(code).toBe(0);
+    expect(await readFile(zshrcPath, "utf8")).toBe(contents);
+    expect(stdout.join("\n")).toMatch(/nothing to do/i);
+  });
+
+  it("is safe to run when the startup file doesn't exist at all", async () => {
+    const { code } = await runTeardown();
+
+    expect(code).toBe(0);
+    await expect(stat(zshrcPath)).rejects.toThrow();
+  });
+
+  it("reports what it deliberately left behind, naming the state directory and the per-Profile removal command — it never touches Profiles", async () => {
+    await writeFile(zshrcPath, `${SHELL_WIRING_LINE}\n`, "utf8");
+    await mkdir(stateDir, { recursive: true });
+    await addProfile(stateDir, "work", await mkdtemp(join(tmpdir(), "ccp-cli-teardown-install-")));
+
+    const { stdout } = await runTeardown();
+
+    const report = stdout.join("\n");
+    expect(report).toContain(stateDir);
+    expect(report).toMatch(/ccp rm/);
+    // Never touched: the Profile registered above is still there afterwards.
+    const { profiles } = await loadRegistry(stateDir);
+    expect(profiles.work).toBeDefined();
+  });
+
+  it("lists 'teardown' in the usage text", async () => {
+    const { stdout, stdoutFn, stderrFn } = captureLines();
+
+    await runCli([], { stdout: stdoutFn, stderr: stderrFn });
+
+    expect(stdout.join("\n")).toMatch(/teardown/);
   });
 });
 

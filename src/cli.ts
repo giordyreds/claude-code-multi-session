@@ -4,7 +4,17 @@ import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
 import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
 import { ProcessDaemonPort, type DaemonPort } from "./daemon.js";
-import { LEGACY_STATE_DIR_NAME, loadVerifiedVersion, recordVerifiedVersion, resolveClaudeVersion, runDoctorChecks } from "./doctor.js";
+import {
+  CONTRACT_CLAUDE_ON_PATH,
+  CONTRACT_STATE_DIRECTORY,
+  LEGACY_STATE_DIR_NAME,
+  loadVerifiedVersion,
+  recordVerifiedVersion,
+  resolveClaudeVersion,
+  runDoctorChecks,
+  SHELL_WIRING_LINE,
+  shellWiringPresent,
+} from "./doctor.js";
 import { isDrifted } from "./drift.js";
 import { seedOnboardingState, type OnboardingSeeder } from "./onboarding.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
@@ -21,11 +31,12 @@ import {
 } from "./registry.js";
 import { repairRig } from "./rig.js";
 import { renderSettings } from "./settings.js";
+import { removeShellWiringLine, writeShellWiringLine } from "./setup.js";
 import { shellInitScript } from "./shell-init.js";
 import { packageVersion } from "./version.js";
 
 const USAGE =
-  "Usage: ccp <command>\n\nCommands:\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  shell-init         Emit the `ccp` shell function, for a shell startup file to `eval`\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  doctor             Run every Check and report each Contract by name alongside what it found —\n                     reports only, never repairs (see `ccp sync`)\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history\n\nFlags:\n  --version          Print ccp's own version\n  --help             Print this usage text";
+  "Usage: ccp <command>\n\nCommands:\n  setup              Wire the `ccp` shell function into your shell's startup file and verify the\n                     machine can run the tool — the second command after installing\n  whoami             Report the bound Profile's identity\n  add <alias>        Create a new Profile\n  ls                 List every Profile\n  login <alias>      Authenticate a Profile and record its resulting identity\n  use [alias]        Bind the current shell to a Profile (via the `ccp` shell function); with no\n                     Alias, shows an interactive picker\n  shell-init         Emit the `ccp` shell function, for a shell startup file to `eval`\n  run <alias>        Run a command under a Profile's identity, no shell function required —\n                     usage: ccp run <alias> -- <command>\n  reconcile <alias>  Accept a drifted Profile's observed identity as its new Expected identity\n  sync               Re-render every Profile's settings and repair its Rig sharing\n  doctor             Run every Check and report each Contract by name alongside what it found —\n                     reports only, never repairs (see `ccp sync`)\n  rm <alias> --yes   Permanently remove a Profile, its configuration and its isolated history\n  teardown           Undo Setup: remove the shell wiring line it added — never touches Profiles\n\nFlags:\n  --version          Print ccp's own version\n  --dry-run          With `setup`, print the line it would add instead of writing it\n  --help             Print this usage text";
 
 const LOGIN_USAGE = "Usage: ccp login <alias>";
 const RUN_USAGE = "Usage: ccp run <alias> -- <command> [args...]";
@@ -194,6 +205,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir, daemonPort, picker, commandRunner };
 
   switch (argv[0]) {
+    case "setup":
+      return runSetup(argv.slice(1), { env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, zshrcPath, stdout, stderr });
     case "whoami":
       return runWhoami(deps);
     case "add":
@@ -216,6 +229,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
       return runDoctor({ env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, zshrcPath, stdout, stderr });
     case "rm":
       return runRm(argv.slice(1), deps);
+    case "teardown":
+      return runTeardown({ zshrcPath, stateDir, stdout, stderr });
     default:
       stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
       return 1;
@@ -876,6 +891,139 @@ async function syncProfile(alias: string, record: ProfileRecord, installDir: str
     line: changes.length > 0 ? `${alias}: ${changes.join("; ")}` : `${alias}: no changes`,
     skipped: false,
   };
+}
+
+/** The two Contract names (`doctor.ts`'s `runDoctorChecks` output) whose own Check failing is the
+ * *only* thing allowed to fail `ccp setup` (issue #35's fixed fatal/non-fatal rule) — every other
+ * Check's problem is still reported, but Setup succeeds anyway, matching the posture already
+ * taken for onboarding pre-seeding: somebody else's Contract changing is not this tool's error.
+ * Built from `doctor.ts`'s own exported constants, not retyped string literals, so a rename of
+ * either Check's name there can never silently desync from this rule. */
+const SETUP_FATAL_CONTRACTS = new Set([CONTRACT_CLAUDE_ON_PATH, CONTRACT_STATE_DIRECTORY]);
+
+/**
+ * `ccp setup` (issue #35): the second and last command a new user types. Adds
+ * {@link SHELL_WIRING_LINE} to the interactive startup file the user's shell actually reads
+ * (`zshrcPath`, resolved the same way `ccp doctor`'s Shell wiring Check reads it — honouring
+ * `$ZDOTDIR` ahead of `$HOME`), then runs the exact same Checks `ccp doctor` exposes
+ * ({@link runDoctorChecks}) so problems surface here, once, rather than later as unexplained
+ * failures. One implementation, two entry points — this function never reimplements a Check.
+ *
+ * `--dry-run` previews the line-writing step only — the machine's state is what it already was,
+ * so there is nothing to verify and no Checks run. It prints exactly what would be added (or that
+ * there's nothing to add, when the line is already present) and nothing else.
+ *
+ * Writing the line always happens first, unconditionally, even when a Check that follows turns
+ * out to fail Setup: the write is independent of whether `claude` is on `PATH` or the state
+ * directory is writable, and the shell wiring line itself is exactly as useful once `claude` is
+ * later fixed. Only {@link SETUP_FATAL_CONTRACTS}'s two Contracts fail Setup's own exit code —
+ * every other Check's finding is still printed, per issue #35's acceptance criteria that a
+ * merely-incomplete machine still ends up wired correctly.
+ *
+ * Ends by naming the next command to run, unconditionally, per this ticket's own acceptance
+ * criteria — success points at `ccp add`; a fatal failure points back at re-running `ccp setup`
+ * once the reported problem (a missing `claude`, an unwritable state directory) is fixed, rather
+ * than leaving a failed run silent about what to do next.
+ */
+async function runSetup(
+  args: string[],
+  deps: {
+    env: NodeJS.ProcessEnv;
+    claudePort: ClaudePort;
+    stateDir: string;
+    installDir: string;
+    installStateFilePath: string;
+    legacyStateDir: string;
+    zshrcPath: string;
+    stdout: (line: string) => void;
+    stderr: (line: string) => void;
+  },
+): Promise<number> {
+  if (args.includes("--dry-run")) {
+    let present: boolean;
+    try {
+      present = await shellWiringPresent(deps.zshrcPath);
+    } catch (err) {
+      return reportError(deps.stderr, err);
+    }
+
+    deps.stdout(
+      present
+        ? `Dry run: ${deps.zshrcPath} already contains the shell wiring line — nothing to add.`
+        : `Dry run: would add the following line to ${deps.zshrcPath}:\n  ${SHELL_WIRING_LINE}`,
+    );
+    return 0;
+  }
+
+  let writeResult: { added: boolean };
+  try {
+    writeResult = await writeShellWiringLine(deps.zshrcPath);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  const lines: string[] = [
+    writeResult.added
+      ? `Added the following line to ${deps.zshrcPath}:\n  ${SHELL_WIRING_LINE}`
+      : `${deps.zshrcPath} already contains the shell wiring line — nothing to add.`,
+  ];
+
+  const reports = await runDoctorChecks({
+    env: deps.env,
+    claudePort: deps.claudePort,
+    stateDir: deps.stateDir,
+    installDir: deps.installDir,
+    installStateFilePath: deps.installStateFilePath,
+    legacyStateDir: deps.legacyStateDir,
+    zshrcPath: deps.zshrcPath,
+  });
+  for (const report of reports) lines.push(`${report.contract}: ${report.finding}`);
+
+  const fatal = reports.some((report) => SETUP_FATAL_CONTRACTS.has(report.contract) && !report.ok);
+  lines.push(
+    fatal
+      ? "Next: fix the problem reported above, then re-run 'ccp setup'."
+      : "Next: run 'ccp add <alias>' to create your first Profile.",
+  );
+
+  deps.stdout(lines.join("\n"));
+  return fatal ? 1 : 0;
+}
+
+/**
+ * `ccp teardown`: Setup's inverse (issue #35). Removes only {@link SHELL_WIRING_LINE} from the
+ * startup file Setup added it to — leaving every other line in the file untouched, and never
+ * touching Profiles, the state directory, or anything else. Safe to run when Setup was never run
+ * at all: {@link removeShellWiringLine} reports `removed: false` rather than throwing when
+ * there's no line to remove.
+ *
+ * Always reports what it deliberately left behind — the state directory and the existing
+ * per-Profile removal command — so the non-destructive choice this makes is visible rather than
+ * silent (this ticket's own acceptance criteria), regardless of whether there was a line to
+ * remove this time.
+ */
+async function runTeardown(deps: {
+  zshrcPath: string;
+  stateDir: string;
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
+}): Promise<number> {
+  let result: { removed: boolean };
+  try {
+    result = await removeShellWiringLine(deps.zshrcPath);
+  } catch (err) {
+    return reportError(deps.stderr, err);
+  }
+
+  const lines = [
+    result.removed
+      ? `Removed the shell wiring line from ${deps.zshrcPath}.`
+      : `${deps.zshrcPath} had no shell wiring line to remove — nothing to do.`,
+    `Left behind on purpose: your Profiles, still under ${deps.stateDir}. Remove one yourself with 'ccp rm <alias> --yes'.`,
+  ];
+
+  deps.stdout(lines.join("\n"));
+  return 0;
 }
 
 /**

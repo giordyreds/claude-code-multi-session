@@ -86,17 +86,26 @@ export interface DoctorContext {
  */
 export async function runDoctorChecks(ctx: DoctorContext): Promise<CheckReport[]> {
   return [
-    await guarded("claude on PATH", () => checkClaudeOnPath(ctx.env)),
+    await guarded(CONTRACT_CLAUDE_ON_PATH, () => checkClaudeOnPath(ctx.env)),
     await guarded("Claude Code version", () => checkClaudeVersion(ctx.claudePort)),
     await guarded("Default install", () => checkDefaultInstall(ctx.installDir)),
     await guarded("Rig", () => checkRig(ctx.installDir)),
     await guarded("Onboarding pre-seeding", () => checkOnboardingPreseed(ctx.installStateFilePath)),
-    await guarded("State directory", () => checkStateDirWritable(ctx.stateDir)),
+    await guarded(CONTRACT_STATE_DIRECTORY, () => checkStateDirWritable(ctx.stateDir)),
     await guarded("Legacy state directory", () => checkLegacyStateDir(ctx.legacyStateDir, ctx.stateDir)),
     await guarded("Shell wiring", () => checkShellWiring(ctx.zshrcPath)),
     await guarded("Identity isolation", () => checkIdentityIsolation(ctx.stateDir, ctx.claudePort)),
   ];
 }
+
+/**
+ * The two Contract names {@link CheckReport} reports that `ccp setup` (issue #35, `src/cli.ts`)
+ * treats as fatal — exported as constants, rather than left as string literals `runSetup` would
+ * have to retype, so a rename of either Check's name here can never silently desync from the rule
+ * that reads it.
+ */
+export const CONTRACT_CLAUDE_ON_PATH = "claude on PATH";
+export const CONTRACT_STATE_DIRECTORY = "State directory";
 
 async function guarded(contract: string, run: () => Promise<CheckOutcome>): Promise<CheckReport> {
   try {
@@ -265,14 +274,26 @@ async function checkLegacyStateDir(legacyStateDir: string, currentStateDir: stri
  * "could not be checked" finding, so nothing here can take the rest of the report down.
  */
 async function checkShellWiring(zshrcPath: string): Promise<CheckOutcome> {
-  const content = await readFileOrEmpty(zshrcPath);
-
-  return content.includes(SHELL_WIRING_LINE)
+  return (await shellWiringPresent(zshrcPath))
     ? { finding: `present in ${zshrcPath}`, ok: true }
     : { finding: `missing from ${zshrcPath} — add this line:\n  ${SHELL_WIRING_LINE}`, ok: false };
 }
 
-async function readFileOrEmpty(path: string): Promise<string> {
+/**
+ * Whether {@link SHELL_WIRING_LINE} is already present in `zshrcPath` — the one predicate this
+ * Check, `setup.ts`'s write/remove, and `ccp setup`'s `--dry-run` preview (`src/cli.ts`) all need,
+ * shared here so "present" can never mean something subtly different at one of those call sites
+ * than at another.
+ */
+export async function shellWiringPresent(zshrcPath: string): Promise<boolean> {
+  return (await readFileOrEmpty(zshrcPath)).includes(SHELL_WIRING_LINE);
+}
+
+/** Reads `path`, resolving `""` when it doesn't exist rather than throwing — shared with
+ * `setup.ts`, which needs the exact same "missing file reads as empty" semantics to decide
+ * whether {@link SHELL_WIRING_LINE} is already present before writing or removing it, so Setup
+ * and this Check can never disagree about what "present" means. */
+export async function readFileOrEmpty(path: string): Promise<string> {
   try {
     return await readFile(path, "utf8");
   } catch (err) {
