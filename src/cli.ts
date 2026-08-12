@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { basename, join, resolve as resolvePath } from "node:path";
 import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
 import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
@@ -95,13 +95,23 @@ function defaultLegacyStateDir(): string {
   return join(homedir(), LEGACY_STATE_DIR_NAME);
 }
 
-/** The `.zshrc` a real interactive zsh actually reads: `$ZDOTDIR/.zshrc` when the zsh
- * dot-directory environment variable is set, `~/.zshrc` otherwise (issue #28's Setup decisions —
- * the same file Setup will target once it exists). `ccp doctor`'s Shell wiring Check reads this
- * file; it never writes to it. */
-function defaultZshrcPath(env: NodeJS.ProcessEnv): string {
-  const dotDir = env.ZDOTDIR || homedir();
-  return join(dotDir, ".zshrc");
+/**
+ * The shell startup file a user's actual interactive shell reads — detected from `$SHELL` alone,
+ * never from `process.platform` (issue #40, ADR-0012): this runs identically on `darwin` and
+ * `linux`, one code path rather than a macOS path and a separate Linux path. `$SHELL`'s basename
+ * names zsh: `$ZDOTDIR/.zshrc` when the zsh dot-directory environment variable is set, `~/.zshrc`
+ * otherwise — unchanged from before this generalized (issue #28's Setup decisions). Every other
+ * case — bash, any other shell name, or `$SHELL` unset entirely — resolves to `~/.bashrc`, no
+ * `.bash_profile`/`.profile` fallback chain, mirroring the zsh convention's single-file shape.
+ * `ccp doctor`'s Shell wiring Check reads whichever file this resolves to; it never writes to it.
+ */
+export function defaultShellRcPath(env: NodeJS.ProcessEnv): string {
+  const shellName = basename(env.SHELL || "");
+  if (shellName === "zsh") {
+    const dotDir = env.ZDOTDIR || homedir();
+    return join(dotDir, ".zshrc");
+  }
+  return join(homedir(), ".bashrc");
 }
 
 export interface RunCliOptions {
@@ -149,9 +159,12 @@ export interface RunCliOptions {
   /** Test seam: where a state directory under the pre-rename name (issue #31) would live, for
    * `ccp doctor`'s Legacy state directory Check. Defaults to `~/.ccacct`. */
   legacyStateDir?: string;
-  /** Test seam: the `.zshrc` `ccp doctor`'s Shell wiring Check reads. Defaults to
-   * `$ZDOTDIR/.zshrc`, or `~/.zshrc` if `$ZDOTDIR` isn't set. */
-  zshrcPath?: string;
+  /** Test seam: the shell startup file `ccp doctor`'s Shell wiring Check reads, and `ccp setup`/
+   * `ccp teardown` write to. Defaults to {@link defaultShellRcPath}'s detection from `$SHELL`. */
+  shellRcPath?: string;
+  /** Test seam: the platform this invocation runs on, for the Windows hard guard (issue #40).
+   * Defaults to `process.platform`. */
+  platform?: string;
 }
 
 /** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
@@ -184,7 +197,8 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   const commandRunner = options.commandRunner ?? runCommand;
   const onboardingSeeder = options.onboardingSeeder ?? seedOnboardingState;
   const legacyStateDir = options.legacyStateDir ?? defaultLegacyStateDir();
-  const zshrcPath = options.zshrcPath ?? defaultZshrcPath(env);
+  const shellRcPath = options.shellRcPath ?? defaultShellRcPath(env);
+  const platform = options.platform ?? process.platform;
 
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     stdout(USAGE);
@@ -202,11 +216,31 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     return 0;
   }
 
+  // The Windows hard guard (issue #40, ADR-0012): checked before any subcommand dispatches below,
+  // so `win32` never runs a Check or touches a file. Deliberately not a `doctor` Contract/Check —
+  // Windows support is `ccp`'s own declared platform scope, not a behaviour of Claude Code.
+  //
+  // The message names the remedy rather than a tracking issue, because under ADR-0013 there is
+  // nothing left to track: native Windows is declined, not deferred, and WSL is the answer. The
+  // "inside your distro, not on the Windows side" clause is the whole reason this is more than one
+  // sentence — a Windows-side `claude` reached through WSL's `PATH` interop can't interpret the
+  // Linux `CLAUDE_CONFIG_DIR` Binding hands it, which is a Phantom binding (CONTEXT.md) and the
+  // only WSL-specific hazard worth spending a line on. This is the one place that warning reaches
+  // the only user who can hit it.
+  if (platform === "win32") {
+    stderr(
+      "Windows isn't supported natively. Run ccp inside WSL: install the linux-x64 binary in your " +
+        "distro, and install Claude Code inside the distro too — not on the Windows side. See " +
+        "https://github.com/giordyreds/claude-code-multi-session#scope",
+    );
+    return 1;
+  }
+
   const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir, daemonPort, picker, commandRunner };
 
   switch (argv[0]) {
     case "setup":
-      return runSetup(argv.slice(1), { env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, zshrcPath, stdout, stderr });
+      return runSetup(argv.slice(1), { env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, shellRcPath, stdout, stderr });
     case "whoami":
       return runWhoami(deps);
     case "add":
@@ -226,11 +260,11 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     case "sync":
       return runSync({ stateDir, installDir, stdout, stderr });
     case "doctor":
-      return runDoctor({ env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, zshrcPath, stdout, stderr });
+      return runDoctor({ env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, shellRcPath, stdout, stderr });
     case "rm":
       return runRm(argv.slice(1), deps);
     case "teardown":
-      return runTeardown({ zshrcPath, stateDir, stdout, stderr });
+      return runTeardown({ shellRcPath, stateDir, stdout, stderr });
     default:
       stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
       return 1;
@@ -904,8 +938,9 @@ const SETUP_FATAL_CONTRACTS = new Set([CONTRACT_CLAUDE_ON_PATH, CONTRACT_STATE_D
 /**
  * `ccp setup` (issue #35): the second and last command a new user types. Adds
  * {@link SHELL_WIRING_LINE} to the interactive startup file the user's shell actually reads
- * (`zshrcPath`, resolved the same way `ccp doctor`'s Shell wiring Check reads it — honouring
- * `$ZDOTDIR` ahead of `$HOME`), then runs the exact same Checks `ccp doctor` exposes
+ * (`shellRcPath`, resolved the same way `ccp doctor`'s Shell wiring Check reads it — see
+ * {@link defaultShellRcPath}'s universal, `$SHELL`-keyed detection, issue #40), then runs the
+ * exact same Checks `ccp doctor` exposes
  * ({@link runDoctorChecks}) so problems surface here, once, rather than later as unexplained
  * failures. One implementation, two entry points — this function never reimplements a Check.
  *
@@ -934,7 +969,7 @@ async function runSetup(
     installDir: string;
     installStateFilePath: string;
     legacyStateDir: string;
-    zshrcPath: string;
+    shellRcPath: string;
     stdout: (line: string) => void;
     stderr: (line: string) => void;
   },
@@ -942,30 +977,30 @@ async function runSetup(
   if (args.includes("--dry-run")) {
     let present: boolean;
     try {
-      present = await shellWiringPresent(deps.zshrcPath);
+      present = await shellWiringPresent(deps.shellRcPath);
     } catch (err) {
       return reportError(deps.stderr, err);
     }
 
     deps.stdout(
       present
-        ? `Dry run: ${deps.zshrcPath} already contains the shell wiring line — nothing to add.`
-        : `Dry run: would add the following line to ${deps.zshrcPath}:\n  ${SHELL_WIRING_LINE}`,
+        ? `Dry run: ${deps.shellRcPath} already contains the shell wiring line — nothing to add.`
+        : `Dry run: would add the following line to ${deps.shellRcPath}:\n  ${SHELL_WIRING_LINE}`,
     );
     return 0;
   }
 
   let writeResult: { added: boolean };
   try {
-    writeResult = await writeShellWiringLine(deps.zshrcPath);
+    writeResult = await writeShellWiringLine(deps.shellRcPath);
   } catch (err) {
     return reportError(deps.stderr, err);
   }
 
   const lines: string[] = [
     writeResult.added
-      ? `Added the following line to ${deps.zshrcPath}:\n  ${SHELL_WIRING_LINE}`
-      : `${deps.zshrcPath} already contains the shell wiring line — nothing to add.`,
+      ? `Added the following line to ${deps.shellRcPath}:\n  ${SHELL_WIRING_LINE}`
+      : `${deps.shellRcPath} already contains the shell wiring line — nothing to add.`,
   ];
 
   const reports = await runDoctorChecks({
@@ -975,7 +1010,7 @@ async function runSetup(
     installDir: deps.installDir,
     installStateFilePath: deps.installStateFilePath,
     legacyStateDir: deps.legacyStateDir,
-    zshrcPath: deps.zshrcPath,
+    shellRcPath: deps.shellRcPath,
   });
   for (const report of reports) lines.push(`${report.contract}: ${report.finding}`);
 
@@ -1003,22 +1038,22 @@ async function runSetup(
  * remove this time.
  */
 async function runTeardown(deps: {
-  zshrcPath: string;
+  shellRcPath: string;
   stateDir: string;
   stdout: (line: string) => void;
   stderr: (line: string) => void;
 }): Promise<number> {
   let result: { removed: boolean };
   try {
-    result = await removeShellWiringLine(deps.zshrcPath);
+    result = await removeShellWiringLine(deps.shellRcPath);
   } catch (err) {
     return reportError(deps.stderr, err);
   }
 
   const lines = [
     result.removed
-      ? `Removed the shell wiring line from ${deps.zshrcPath}.`
-      : `${deps.zshrcPath} had no shell wiring line to remove — nothing to do.`,
+      ? `Removed the shell wiring line from ${deps.shellRcPath}.`
+      : `${deps.shellRcPath} had no shell wiring line to remove — nothing to do.`,
     `Left behind on purpose: your Profiles, still under ${deps.stateDir}. Remove one yourself with 'ccp rm <alias> --yes'.`,
   ];
 
@@ -1050,7 +1085,7 @@ async function runDoctor(deps: {
   installDir: string;
   installStateFilePath: string;
   legacyStateDir: string;
-  zshrcPath: string;
+  shellRcPath: string;
   stdout: (line: string) => void;
   stderr: (line: string) => void;
 }): Promise<number> {

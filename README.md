@@ -6,7 +6,11 @@ personal Pro subscription in another — without logging in and out to switch.
 
 It never touches your existing `~/.claude` installation, never reads or stores
 credentials, and shares your skills, plugins, hooks and commands across every identity
-you add. macOS + zsh only; built as a personal tool, not published.
+you add. macOS and Linux, bash or zsh; built as a personal tool, not published. On Windows,
+run it inside WSL — WSL is Linux as far as `ccp` is concerned, and native Windows is
+[deliberately not supported](./docs/adr/0013-windows-is-not-supported-natively-wsl-is-the-windows-story.md):
+every subcommand fails fast on `win32` with a clear message instead of a confusing path or
+permissions error.
 
 ## Concepts
 
@@ -72,9 +76,20 @@ it's what a private repo does to an unauthenticated request.)
 | --- | --- |
 | macOS, Apple Silicon | `darwin-arm64` |
 | macOS, Intel | `darwin-x64` |
+| Linux, x64 | `linux-x64` |
+| Linux, arm64 | `linux-arm64` |
+| Windows, via WSL | `linux-x64` |
 
-`ccp` itself only supports macOS + zsh (see [Scope](#scope)); the release pipeline also
-builds Linux and Windows binaries, but there's nothing for them to install onto today.
+`ccp` itself supports macOS and Linux, bash or zsh (see [Scope](#scope)); the release
+pipeline also builds musl variants of the Linux binaries, for Alpine-style distros.
+
+**On Windows, take `linux-x64` and install it inside your WSL distro** — not the
+`windows-x64` asset, which exists only to tell you that. Install Claude Code inside the
+distro too, not on the Windows side: WSL puts the Windows `PATH` on your Linux `PATH`, so a
+Windows-side `claude` is reachable from inside the distro and will silently ignore the
+Binding `ccp` gives it. `ccp doctor` names the `claude` it found, so you can check which one
+you have. See
+[ADR-0013](./docs/adr/0013-windows-is-not-supported-natively-wsl-is-the-windows-story.md).
 
 Then run Setup:
 
@@ -83,8 +98,9 @@ ccp setup
 ```
 
 **Setup** adds the `ccp` shell function to the interactive startup file your shell
-actually reads — `$ZDOTDIR/.zshrc` if you use a managed dotfile setup, `~/.zshrc`
-otherwise — by evaluating what `ccp shell-init` prints, rather than `source`-ing
+actually reads, detected from `$SHELL` — `$ZDOTDIR/.zshrc` (or `~/.zshrc`) for zsh,
+`~/.bashrc` for bash or anything else (including an unset `$SHELL`) — by evaluating what
+`ccp shell-init` prints, rather than `source`-ing
 `shell/ccp.sh` by an absolute path. An absolute path can move — the binary gets replaced,
 reinstalled somewhere else, or removed — while the emitted line works unchanged wherever
 `ccp` ends up, and is a no-op — no output, exit status 0 — if it's removed entirely, since
@@ -199,6 +215,23 @@ filesystem deletion, regardless of what you remove here.
 
 ## Scope
 
+- Supported platforms: macOS and Linux, with bash or zsh as your login shell — detected
+  from `$SHELL`, never assumed from `process.platform` (see
+  [ADR-0012](./docs/adr/0012-linux-is-supported-detection-is-universal-windows-is-deferred.md)).
+- Windows: **use WSL**, and install Claude Code inside the distro. Native Windows is
+  declined rather than pending — `ccp`'s Binding, shell wiring, stdout quoting, Rig
+  symlinking, status line, `run`, and daemon cleanup are POSIX mechanisms, and a PowerShell
+  family would be a parallel implementation of all seven (see
+  [ADR-0013](./docs/adr/0013-windows-is-not-supported-natively-wsl-is-the-windows-story.md)).
+  Every subcommand fails fast on `win32` with a clear message instead of running, so nothing
+  is left half-configured.
+- WSL is supported by inheritance, and hasn't been observed end to end. WSL2 runs the same
+  `linux-x64` binary against a real Linux kernel, so the `CLAUDE_CONFIG_DIR` Contract
+  verified against a real Linux Claude Code install (ADR-0012) applies unchanged, as does
+  `/proc`-based daemon cleanup. What no one has run on a real WSL install is the interop
+  boundary: whether a Windows-side `claude` shadows the one in your distro, and whether the
+  `claude auth login` that `ccp login` delegates to reaches a browser. If you hit either,
+  that's new information, not a documented limitation.
 - No liveness checking — reports stored login state, honestly labeled as such.
 - No automatic login — every browser-opening step is explicit.
 - No migration of your existing `~/.claude` install; unbound shells keep using it
@@ -207,7 +240,9 @@ filesystem deletion, regardless of what you remove here.
   that reads or writes credential material — every login is delegated to Claude Code
   itself.
 
-Full rationale and out-of-scope list in the [PRD](https://github.com/giordyreds/claude-code-multi-session/issues/14).
+Full rationale and out-of-scope list in the [PRD](https://github.com/giordyreds/claude-code-multi-session/issues/14)
+and the [Linux-support PRD](https://github.com/giordyreds/claude-code-multi-session/issues/40);
+the Windows decision is [ADR-0013](./docs/adr/0013-windows-is-not-supported-natively-wsl-is-the-windows-story.md).
 
 ## Releases
 

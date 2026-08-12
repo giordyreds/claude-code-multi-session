@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
 import { LEGACY_STATE_DIR_NAME, runDoctorChecks, SHELL_WIRING_LINE, type DoctorContext } from "../src/doctor.js";
@@ -49,7 +49,7 @@ describe("runDoctorChecks", () => {
   let installDir: string;
   let stateDir: string;
   let legacyStateDir: string;
-  let zshrcPath: string;
+  let shellRcPath: string;
   let installStateFilePath: string;
 
   beforeEach(async () => {
@@ -59,7 +59,7 @@ describe("runDoctorChecks", () => {
     // machine that's never run `ccp add`/`ccp login` yet.
     stateDir = join(root, "ccp");
     legacyStateDir = join(root, "legacy-ccacct");
-    zshrcPath = join(root, ".zshrc");
+    shellRcPath = join(root, ".zshrc");
     installStateFilePath = join(root, ".claude.json");
     await mkdir(installDir, { recursive: true });
   });
@@ -76,7 +76,7 @@ describe("runDoctorChecks", () => {
       installDir,
       installStateFilePath,
       legacyStateDir,
-      zshrcPath,
+      shellRcPath,
       ...overrides,
     };
   }
@@ -107,7 +107,28 @@ describe("runDoctorChecks", () => {
 
       const reports = await runDoctorChecks(context({ env: { PATH: binDir } }));
 
-      expect(await findReport(reports, "claude on PATH")).toMatch(/found/i);
+      // The path itself, not just the word "found" — ADR-0013. Asserted as an exact string rather
+      // than a loose match, since `/found/i` also matches this Check's own "not found" finding.
+      expect(await findReport(reports, "claude on PATH")).toBe(`found at ${claudePath}`);
+    });
+
+    it("names which `claude` it found when more than one is on PATH", async () => {
+      // Two installs on one machine is ordinary — a Homebrew one shadowing an npm one, or under
+      // WSL, a Windows-side one reachable through PATH interop (ADR-0013). A finding that said
+      // only "found" couldn't tell you which one every later Check went on to observe.
+      const firstDir = join(root, "first-bin");
+      const secondDir = join(root, "second-bin");
+      await mkdir(firstDir);
+      await mkdir(secondDir);
+      for (const dir of [firstDir, secondDir]) {
+        await writeFile(join(dir, "claude"), "#!/bin/sh\n", "utf8");
+        await chmod(join(dir, "claude"), 0o755);
+      }
+
+      const reports = await runDoctorChecks(context({ env: { PATH: `${firstDir}${delimiter}${secondDir}` } }));
+
+      // The earlier PATH entry wins, which is the one the shell would actually run.
+      expect(await findReport(reports, "claude on PATH")).toBe(`found at ${join(firstDir, "claude")}`);
     });
 
     it("reports not found when no directory on PATH has an executable `claude`", async () => {
@@ -266,15 +287,15 @@ describe("runDoctorChecks", () => {
 
   describe("Shell wiring", () => {
     it("detects the guarded line when present", async () => {
-      await writeFile(zshrcPath, `# my zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
+      await writeFile(shellRcPath, `# my zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
 
       const reports = await runDoctorChecks(context());
 
-      expect(await findReport(reports, "Shell wiring")).toMatch(new RegExp(`present in ${zshrcPath}`));
+      expect(await findReport(reports, "Shell wiring")).toMatch(new RegExp(`present in ${shellRcPath}`));
     });
 
     it("prints the exact line to add when the file has no shell wiring at all", async () => {
-      await writeFile(zshrcPath, "# my zshrc\n", "utf8");
+      await writeFile(shellRcPath, "# my zshrc\n", "utf8");
 
       const reports = await runDoctorChecks(context());
 
@@ -291,7 +312,7 @@ describe("runDoctorChecks", () => {
       const notADir = join(root, "not-a-directory-3");
       await writeFile(notADir, "x", "utf8");
 
-      const reports = await runDoctorChecks(context({ zshrcPath: join(notADir, "child") }));
+      const reports = await runDoctorChecks(context({ shellRcPath: join(notADir, "child") }));
 
       expect(await findReport(reports, "Shell wiring")).toMatch(/could not be checked/i);
     });
@@ -385,7 +406,7 @@ describe("runDoctorChecks", () => {
     await writeFile(installStateFilePath, installStateContents, "utf8");
     await mkdir(legacyStateDir, { recursive: true });
     const zshrcContents = "# my zshrc\n";
-    await writeFile(zshrcPath, zshrcContents, "utf8");
+    await writeFile(shellRcPath, zshrcContents, "utf8");
 
     const installEntriesBefore = (await readdir(installDir)).sort();
 
@@ -399,6 +420,6 @@ describe("runDoctorChecks", () => {
     expect((await readdir(installDir)).sort()).toEqual(installEntriesBefore);
     // Neither file Checks only ever read was modified.
     await expect(readFile(installStateFilePath, "utf8")).resolves.toBe(installStateContents);
-    await expect(readFile(zshrcPath, "utf8")).resolves.toBe(zshrcContents);
+    await expect(readFile(shellRcPath, "utf8")).resolves.toBe(zshrcContents);
   });
 });

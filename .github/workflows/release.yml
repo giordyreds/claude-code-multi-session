@@ -14,8 +14,13 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  # Runs on both platforms `ccp` actually supports (issue #40, ADR-0012), so a Linux-motivated
+  # change can't silently regress the platform `ccp` has actually been used on, or vice versa.
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,10 +33,24 @@ jobs:
       # package-lock.json pins and the test suite runs against.
       - run: npm ci
 
-      # Only the typecheck and unit tests gate a release; there's no integration suite here that
-      # needs a real Claude Code install to run against.
       - run: npm run typecheck
       - run: npm test
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Deps come from npm (not `bun install`) so the bundler resolves exactly the tree
+      # package-lock.json pins the build itself needs — `test`'s ubuntu-latest leg already ran
+      # the exact same typecheck/test just above, gating this job via `needs`.
+      - run: npm ci
 
       - uses: oven-sh/setup-bun@v2
         with:

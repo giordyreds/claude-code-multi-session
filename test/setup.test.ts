@@ -7,11 +7,11 @@ import { removeShellWiringLine, writeShellWiringLine } from "../src/setup.js";
 
 describe("writeShellWiringLine", () => {
   let root: string;
-  let zshrcPath: string;
+  let shellRcPath: string;
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "ccp-setup-test-"));
-    zshrcPath = join(root, ".zshrc");
+    shellRcPath = join(root, ".zshrc");
   });
 
   afterEach(async () => {
@@ -19,19 +19,19 @@ describe("writeShellWiringLine", () => {
   });
 
   it("writes the guarded line to a file that lacks it", async () => {
-    await writeFile(zshrcPath, "# my zshrc\n", "utf8");
+    await writeFile(shellRcPath, "# my zshrc\n", "utf8");
 
-    const result = await writeShellWiringLine(zshrcPath);
+    const result = await writeShellWiringLine(shellRcPath);
 
     expect(result).toEqual({ added: true });
-    expect(await readFile(zshrcPath, "utf8")).toBe(`# my zshrc\n${SHELL_WIRING_LINE}\n`);
+    expect(await readFile(shellRcPath, "utf8")).toBe(`# my zshrc\n${SHELL_WIRING_LINE}\n`);
   });
 
   it("creates the file when it doesn't exist yet", async () => {
-    const result = await writeShellWiringLine(zshrcPath);
+    const result = await writeShellWiringLine(shellRcPath);
 
     expect(result).toEqual({ added: true });
-    expect(await readFile(zshrcPath, "utf8")).toBe(`${SHELL_WIRING_LINE}\n`);
+    expect(await readFile(shellRcPath, "utf8")).toBe(`${SHELL_WIRING_LINE}\n`);
   });
 
   it("creates the parent directory when it doesn't exist yet, matching a from-scratch machine", async () => {
@@ -43,21 +43,21 @@ describe("writeShellWiringLine", () => {
   });
 
   it("adds a leading newline when the existing content doesn't already end in one", async () => {
-    await writeFile(zshrcPath, "# my zshrc, no trailing newline", "utf8");
+    await writeFile(shellRcPath, "# my zshrc, no trailing newline", "utf8");
 
-    await writeShellWiringLine(zshrcPath);
+    await writeShellWiringLine(shellRcPath);
 
-    expect(await readFile(zshrcPath, "utf8")).toBe(`# my zshrc, no trailing newline\n${SHELL_WIRING_LINE}\n`);
+    expect(await readFile(shellRcPath, "utf8")).toBe(`# my zshrc, no trailing newline\n${SHELL_WIRING_LINE}\n`);
   });
 
   it("writes nothing on a second run — idempotent", async () => {
-    await writeFile(zshrcPath, `# my zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
-    const before = await readFile(zshrcPath, "utf8");
+    await writeFile(shellRcPath, `# my zshrc\n${SHELL_WIRING_LINE}\n`, "utf8");
+    const before = await readFile(shellRcPath, "utf8");
 
-    const result = await writeShellWiringLine(zshrcPath);
+    const result = await writeShellWiringLine(shellRcPath);
 
     expect(result).toEqual({ added: false });
-    expect(await readFile(zshrcPath, "utf8")).toBe(before);
+    expect(await readFile(shellRcPath, "utf8")).toBe(before);
   });
 
   it("propagates a real filesystem error rather than swallowing it", async () => {
@@ -70,11 +70,11 @@ describe("writeShellWiringLine", () => {
 
 describe("removeShellWiringLine", () => {
   let root: string;
-  let zshrcPath: string;
+  let shellRcPath: string;
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "ccp-setup-test-"));
-    zshrcPath = join(root, ".zshrc");
+    shellRcPath = join(root, ".zshrc");
   });
 
   afterEach(async () => {
@@ -82,37 +82,37 @@ describe("removeShellWiringLine", () => {
   });
 
   it("removes the line it added, leaving unrelated content untouched", async () => {
-    await writeFile(zshrcPath, `# before\nexport FOO=bar\n${SHELL_WIRING_LINE}\n# after\n`, "utf8");
+    await writeFile(shellRcPath, `# before\nexport FOO=bar\n${SHELL_WIRING_LINE}\n# after\n`, "utf8");
 
-    const result = await removeShellWiringLine(zshrcPath);
+    const result = await removeShellWiringLine(shellRcPath);
 
     expect(result).toEqual({ removed: true });
-    expect(await readFile(zshrcPath, "utf8")).toBe("# before\nexport FOO=bar\n# after\n");
+    expect(await readFile(shellRcPath, "utf8")).toBe("# before\nexport FOO=bar\n# after\n");
   });
 
   it("is safe to run when no line is present, and leaves the file untouched", async () => {
     const contents = "# my zshrc, never had the line\n";
-    await writeFile(zshrcPath, contents, "utf8");
+    await writeFile(shellRcPath, contents, "utf8");
 
-    const result = await removeShellWiringLine(zshrcPath);
+    const result = await removeShellWiringLine(shellRcPath);
 
     expect(result).toEqual({ removed: false });
-    expect(await readFile(zshrcPath, "utf8")).toBe(contents);
+    expect(await readFile(shellRcPath, "utf8")).toBe(contents);
   });
 
   it("is safe to run when the file doesn't exist at all", async () => {
-    const result = await removeShellWiringLine(zshrcPath);
+    const result = await removeShellWiringLine(shellRcPath);
 
     expect(result).toEqual({ removed: false });
-    await expect(stat(zshrcPath)).rejects.toThrow();
+    await expect(stat(shellRcPath)).rejects.toThrow();
   });
 
   it("removes every occurrence of the exact line, not just the first", async () => {
-    await writeFile(zshrcPath, `${SHELL_WIRING_LINE}\n# middle\n${SHELL_WIRING_LINE}\n`, "utf8");
+    await writeFile(shellRcPath, `${SHELL_WIRING_LINE}\n# middle\n${SHELL_WIRING_LINE}\n`, "utf8");
 
-    await removeShellWiringLine(zshrcPath);
+    await removeShellWiringLine(shellRcPath);
 
-    expect(await readFile(zshrcPath, "utf8")).toBe("# middle\n");
+    expect(await readFile(shellRcPath, "utf8")).toBe("# middle\n");
   });
 
   it("propagates a real filesystem error rather than misreporting it as 'nothing to remove'", async () => {
@@ -126,15 +126,15 @@ describe("removeShellWiringLine", () => {
 describe("writeShellWiringLine and removeShellWiringLine round-trip", () => {
   it("leaves the file exactly as it started once written then removed", async () => {
     const root = await mkdtemp(join(tmpdir(), "ccp-setup-test-"));
-    const zshrcPath = join(root, ".zshrc");
+    const shellRcPath = join(root, ".zshrc");
     try {
       const original = "# my existing zshrc\nexport PATH=\"$PATH:/usr/local/bin\"\n";
-      await writeFile(zshrcPath, original, "utf8");
+      await writeFile(shellRcPath, original, "utf8");
 
-      await writeShellWiringLine(zshrcPath);
-      await removeShellWiringLine(zshrcPath);
+      await writeShellWiringLine(shellRcPath);
+      await removeShellWiringLine(shellRcPath);
 
-      expect(await readFile(zshrcPath, "utf8")).toBe(original);
+      expect(await readFile(shellRcPath, "utf8")).toBe(original);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
