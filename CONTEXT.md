@@ -53,6 +53,13 @@ Pointing a shell at a Profile, so commands run in that shell adopt its identity.
 A shell property, not a machine property; several shells may be bound differently at once.
 _Avoid_: switching, activating, selecting, using
 
+**Phantom binding**:
+A shell that reports being bound to a Profile while its Sessions don't actually adopt that
+Profile — the prompt indicator and the Binding command's exit status both say bound, and the
+running Claude Code isn't. Distinct from Drift, which is an identity mismatch in a Binding
+that did take effect; here the Binding never reached the Session at all.
+_Avoid_: drift, silent failure, broken binding
+
 **Login**:
 Authenticating a Profile against Anthropic. Happens once per Profile and is always
 explicit, because it opens a browser. Distinct from Binding — a Profile can be

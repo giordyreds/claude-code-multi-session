@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
 import { LEGACY_STATE_DIR_NAME, runDoctorChecks, SHELL_WIRING_LINE, type DoctorContext } from "../src/doctor.js";
@@ -107,7 +107,28 @@ describe("runDoctorChecks", () => {
 
       const reports = await runDoctorChecks(context({ env: { PATH: binDir } }));
 
-      expect(await findReport(reports, "claude on PATH")).toMatch(/found/i);
+      // The path itself, not just the word "found" — ADR-0013. Asserted as an exact string rather
+      // than a loose match, since `/found/i` also matches this Check's own "not found" finding.
+      expect(await findReport(reports, "claude on PATH")).toBe(`found at ${claudePath}`);
+    });
+
+    it("names which `claude` it found when more than one is on PATH", async () => {
+      // Two installs on one machine is ordinary — a Homebrew one shadowing an npm one, or under
+      // WSL, a Windows-side one reachable through PATH interop (ADR-0013). A finding that said
+      // only "found" couldn't tell you which one every later Check went on to observe.
+      const firstDir = join(root, "first-bin");
+      const secondDir = join(root, "second-bin");
+      await mkdir(firstDir);
+      await mkdir(secondDir);
+      for (const dir of [firstDir, secondDir]) {
+        await writeFile(join(dir, "claude"), "#!/bin/sh\n", "utf8");
+        await chmod(join(dir, "claude"), 0o755);
+      }
+
+      const reports = await runDoctorChecks(context({ env: { PATH: `${firstDir}${delimiter}${secondDir}` } }));
+
+      // The earlier PATH entry wins, which is the one the shell would actually run.
+      expect(await findReport(reports, "claude on PATH")).toBe(`found at ${join(firstDir, "claude")}`);
     });
 
     it("reports not found when no directory on PATH has an executable `claude`", async () => {

@@ -219,8 +219,20 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
   // The Windows hard guard (issue #40, ADR-0012): checked before any subcommand dispatches below,
   // so `win32` never runs a Check or touches a file. Deliberately not a `doctor` Contract/Check —
   // Windows support is `ccp`'s own declared platform scope, not a behaviour of Claude Code.
+  //
+  // The message names the remedy rather than a tracking issue, because under ADR-0013 there is
+  // nothing left to track: native Windows is declined, not deferred, and WSL is the answer. The
+  // "inside your distro, not on the Windows side" clause is the whole reason this is more than one
+  // sentence — a Windows-side `claude` reached through WSL's `PATH` interop can't interpret the
+  // Linux `CLAUDE_CONFIG_DIR` Binding hands it, which is a Phantom binding (CONTEXT.md) and the
+  // only WSL-specific hazard worth spending a line on. This is the one place that warning reaches
+  // the only user who can hit it.
   if (platform === "win32") {
-    stderr("Windows isn't supported yet. Track support at: https://github.com/giordyreds/claude-code-multi-session/issues/41");
+    stderr(
+      "Windows isn't supported natively. Run ccp inside WSL: install the linux-x64 binary in your " +
+        "distro, and install Claude Code inside the distro too — not on the Windows side. See " +
+        "https://github.com/giordyreds/claude-code-multi-session#scope",
+    );
     return 1;
   }
 

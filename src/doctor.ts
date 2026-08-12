@@ -128,14 +128,23 @@ const CLAUDE_EXECUTABLE = "claude";
  * this Check costs nothing even if it's run often. `PATH` is `:`-delimited on every platform
  * `ccp` supports — macOS and Linux alike (issue #40, ADR-0012); Windows never reaches this Check
  * at all, guarded out earlier in `runCli` (`src/cli.ts`).
+ *
+ * Reports *which* file it found, not merely that it found one (ADR-0013). Two `claude` installs on
+ * one machine are ordinary — a Homebrew one shadowing an npm one, say — and a Check that says only
+ * "found" can't tell you which one every other Check then went on to observe. Under WSL the same
+ * finding does a second job for free: `PATH` interop puts the Windows-side install on `PATH` as
+ * `/mnt/c/…/claude`, and a Windows process can't interpret the Linux `CLAUDE_CONFIG_DIR` that
+ * Binding hands it — a Phantom binding (CONTEXT.md). Naming the path makes that visible without a
+ * WSL-aware branch, which ADR-0012's universal-detection principle is the reason not to add.
  */
 async function checkClaudeOnPath(env: NodeJS.ProcessEnv): Promise<CheckOutcome> {
   const dirs = (env.PATH ?? "").split(delimiter).filter((dir) => dir.length > 0);
 
   for (const dir of dirs) {
+    const candidate = join(dir, CLAUDE_EXECUTABLE);
     try {
-      await access(join(dir, CLAUDE_EXECUTABLE), constants.X_OK);
-      return { finding: "found on PATH", ok: true };
+      await access(candidate, constants.X_OK);
+      return { finding: `found at ${candidate}`, ok: true };
     } catch {
       // Deliberately broad, unlike isDirectory/readFileOrEmpty below: this is a multi-candidate
       // scan across every PATH entry, not a single path's existence check, so one directory
