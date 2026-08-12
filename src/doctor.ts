@@ -3,8 +3,9 @@ import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promi
 import { delimiter, dirname, join } from "node:path";
 import type { AuthStatus, ClaudePort } from "./claude-port.js";
 import { isErrnoException } from "./fs-utils.js";
+import { formatIdentity, identityKey, type Identity } from "./identity.js";
 import { onboardingSourceReady } from "./onboarding.js";
-import { loadRegistry, type ExpectedIdentity } from "./registry.js";
+import { loadRegistry } from "./registry.js";
 import { RIG_ITEMS } from "./rig.js";
 
 /**
@@ -354,7 +355,7 @@ async function checkIdentityIsolation(stateDir: string, claudePort: ClaudePort):
         return { alias, expected: record.expectedIdentity, observed };
       }),
     )
-  ).filter((entry): entry is { alias: string; expected: ExpectedIdentity; observed: ExpectedIdentity } => entry !== undefined);
+  ).filter((entry): entry is { alias: string; expected: Identity; observed: Identity } => entry !== undefined);
 
   if (comparable.length === 0) {
     return {
@@ -390,25 +391,12 @@ async function checkIdentityIsolation(stateDir: string, claudePort: ClaudePort):
     : { finding: warnings.join("; "), ok: false };
 }
 
-/** The (Account, Organization) `status` reports, or `undefined` when there isn't a full pair to
- * compare — a Profile that's logged out, or one `claude` reports as logged in without both
- * `email` and `orgName` (permitted by {@link AuthStatus}'s shape — ADR-0005). */
-function observedIdentity(status: AuthStatus): ExpectedIdentity | undefined {
+/** The Identity `status` reports, or `undefined` when there isn't a full pair to compare — a
+ * Profile that's logged out, or one `claude` reports as logged in without both `email` and
+ * `orgName` (permitted by {@link AuthStatus}'s shape — ADR-0005). */
+function observedIdentity(status: AuthStatus): Identity | undefined {
   if (!status.loggedIn || status.email === undefined || status.orgName === undefined) return undefined;
   return { email: status.email, orgName: status.orgName };
-}
-
-/** A stable key for grouping (Account, Organization) pairs — same shape `drift.ts` compares field
- * by field, just collapsed into one comparable string. */
-function identityKey(identity: ExpectedIdentity): string {
-  return JSON.stringify([identity.email, identity.orgName]);
-}
-
-/** Renders an (Account, Organization) pair for a Check finding — same shape `src/cli.ts`'s
- * `formatAccountAndOrg` renders it in command output, kept as its own copy here since doctor.ts
- * has no dependency on cli.ts. */
-function formatIdentity(identity: ExpectedIdentity): string {
-  return `${identity.email} (${identity.orgName})`;
 }
 
 /**
