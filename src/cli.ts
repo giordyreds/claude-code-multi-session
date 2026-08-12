@@ -16,6 +16,7 @@ import {
   shellWiringPresent,
 } from "./doctor.js";
 import { isDrifted } from "./drift.js";
+import { formatIdentity, type Identity } from "./identity.js";
 import { seedOnboardingState, type OnboardingSeeder } from "./onboarding.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
 import {
@@ -25,7 +26,6 @@ import {
   recordDrift,
   recordExpectedIdentity,
   removeProfile,
-  type ExpectedIdentity,
   type ProfileRecord,
   type Registry,
 } from "./registry.js";
@@ -288,7 +288,7 @@ async function runWhoami(deps: CliDeps): Promise<number> {
     return reportError(deps.stderr, err);
   }
 
-  deps.stdout(formatIdentity(alias, status));
+  deps.stdout(formatIdentityReport(alias, status));
   return 0;
 }
 
@@ -382,7 +382,7 @@ async function runLogin(
 
   await recordExpectedIdentity(deps.stateDir, alias, { email: status.email, orgName: status.orgName });
 
-  deps.stdout(formatIdentity(alias, status));
+  deps.stdout(formatIdentityReport(alias, status));
   return 0;
 }
 
@@ -573,8 +573,8 @@ async function reportDriftAndUpdateRegistry(
     // moment that catches "someone logged in directly while a shell was bound" before it bills
     // the wrong Organization.
     deps.stderr(`!!! DRIFT DETECTED for Profile '${alias}' !!!`);
-    deps.stderr(`  Expected identity: ${formatAccountAndOrg(expectedIdentity)}`);
-    deps.stderr(`  Observed identity: ${formatAccountAndOrg({ email, orgName })}`);
+    deps.stderr(`  Expected identity: ${formatIdentity(expectedIdentity)}`);
+    deps.stderr(`  Observed identity: ${formatIdentity({ email, orgName })}`);
     deps.stderr(`Binding '${alias}' anyway. Run 'ccp reconcile ${alias}' if the observed identity is now correct.`);
   }
 
@@ -618,10 +618,10 @@ async function runReconcile(
     return 1;
   }
 
-  const identity: ExpectedIdentity = { email: status.email, orgName: status.orgName };
+  const identity: Identity = { email: status.email, orgName: status.orgName };
   await recordExpectedIdentity(deps.stateDir, alias, identity);
 
-  deps.stdout(`Reconciled '${alias}': Expected identity is now ${formatAccountAndOrg(identity)}.`);
+  deps.stdout(`Reconciled '${alias}': Expected identity is now ${formatIdentity(identity)}.`);
   return 0;
 }
 
@@ -699,8 +699,12 @@ async function runRm(args: string[], deps: CliDeps): Promise<number> {
  * by {@link AuthStatus}'s shape, even though the real `claude auth status --json` always
  * supplies both — ADR-0005) falls back to `(unknown)` instead: reusing `(not logged in)` there
  * would be an outright false statement, not an honest fallback.
+ *
+ * Distinct from `identity.ts`'s {@link formatIdentity}: this also names the Alias and lays the
+ * pair out across separate lines, rather than rendering the "email (orgName)" shape that function
+ * owns.
  */
-function formatIdentity(alias: string, status: AuthStatus): string {
+function formatIdentityReport(alias: string, status: AuthStatus): string {
   const account = !status.loggedIn ? NOT_LOGGED_IN : status.email ?? UNKNOWN;
   const organization = !status.loggedIn ? NOT_LOGGED_IN : status.orgName ?? UNKNOWN;
   return [`Alias:        ${alias}`, `Account:      ${account}`, `Organization: ${organization}`].join("\n");
@@ -757,7 +761,7 @@ async function runLs(deps: CliDeps): Promise<number> {
   const lines = Object.entries(profiles)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([alias, record]) => {
-      const identity = record.expectedIdentity ? formatAccountAndOrg(record.expectedIdentity) : NEVER_LOGGED_IN;
+      const identity = record.expectedIdentity ? formatIdentity(record.expectedIdentity) : NEVER_LOGGED_IN;
       const driftMarker = record.drifted ? ` ${DRIFTED_MARKER}` : "";
       return `${alias}: ${identity}${driftMarker}`;
     });
@@ -775,20 +779,13 @@ async function runLs(deps: CliDeps): Promise<number> {
   return 0;
 }
 
-/** Renders an (Account, Organization) pair the way both a recorded Expected identity and a live
- * {@link AuthStatus} are shown in `ccp ls` (and a Drift warning in `ccp use`) — the one shape
- * every call site shares. */
-function formatAccountAndOrg(identity: { email: string; orgName: string }): string {
-  return `${identity.email} (${identity.orgName})`;
-}
-
 /** Renders a live {@link AuthStatus} the way `ccp ls`'s Default-install row and the picker's rows
  * (ticket #9) both need it: an explicit `(not logged in)` rather than a blank, otherwise the
- * resolved Account/Organization pair. */
+ * resolved Account/Organization pair, via `identity.ts`'s {@link formatIdentity}. */
 function formatLiveIdentity(status: AuthStatus): string {
   return !status.loggedIn
     ? NOT_LOGGED_IN
-    : formatAccountAndOrg({ email: status.email ?? UNKNOWN, orgName: status.orgName ?? UNKNOWN });
+    : formatIdentity({ email: status.email ?? UNKNOWN, orgName: status.orgName ?? UNKNOWN });
 }
 
 /**

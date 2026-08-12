@@ -18,17 +18,32 @@ _Avoid_: name, id, label
 
 **Account**:
 The Anthropic-side login, identified by email address. Owned by Anthropic, not by us.
-_Avoid_: user, login, identity
+_Avoid_: user, login, identity (an Account is one half of an Identity, never the whole)
 
 **Organization**:
 The Anthropic-side org a Profile bills and rate-limits against. Determines entitlements
 such as seat tier and available models. One Account may hold seats in several.
 _Avoid_: team, org unit, workspace, tenant
 
+**Identity**:
+One (Account, Organization) pair — the thing a Profile resolves to. Never used bare: an
+Identity is always either Expected or Observed, and which one is the authority is the
+whole difference between them. Both halves are always present, by definition — a pair
+missing either one is not a partial Identity, it is not an Identity at all.
+_Avoid_: credentials, session, login
+
 **Expected identity**:
-The (Account, Organization) pair a Profile is recorded as resolving to. An expectation,
-never an authority — see Drift.
+The Identity a Profile is recorded as resolving to. An expectation, never an authority —
+see Drift.
 _Avoid_: actual identity, true identity
+
+**Observed identity**:
+The Identity `claude` currently reports for a Profile. The authority Reconciliation
+accepts as truth. A Profile has one only when `claude` reports both halves: one that is
+logged out, or that reports being logged in without naming both an Account and an
+Organization, has no Observed identity at all — and so has nothing that can drift, and
+nothing that can be reconciled.
+_Avoid_: actual identity, true identity, current identity
 
 ### Machine state
 

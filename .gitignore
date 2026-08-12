@@ -6,3 +6,5 @@ bin-dist/
 # parallel-solver: prefetched tickets, logs, and worktree sandboxes
 .parallel-solver*
 sandbox.Dockerfile
+# /improve-codebase-architecture reports — regenerable, never part of the repo
+architecture-review-*.html
