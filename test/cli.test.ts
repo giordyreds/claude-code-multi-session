@@ -2220,6 +2220,19 @@ describe("runCli Windows guard (issue #40, ADR-0012)", () => {
     await expect(stat(stateDir)).rejects.toThrow();
   });
 
+  it("names WSL and the install-inside-the-distro requirement — the guard is the only channel to a Windows user", async () => {
+    const { stderr, stdoutFn, stderrFn } = captureLines();
+
+    await runCli(["setup"], { platform: "win32", stateDir, installDir, stdout: stdoutFn, stderr: stderrFn });
+
+    // `doctor` never runs on `win32` (the guard sits ahead of every subcommand), so nothing else
+    // can carry this guidance — see ADR-0013. Both halves are asserted: WSL as the remedy, and
+    // that Claude Code belongs inside the distro, without which a Windows-side `claude` reached
+    // through WSL's PATH interop produces a Phantom binding (CONTEXT.md).
+    expect(stderr.join("\n")).toMatch(/WSL/);
+    expect(stderr.join("\n")).toMatch(/not on the Windows side/i);
+  });
+
   it("prints the guard message to stderr, never stdout — ADR-0004's discipline applies here too", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
 
