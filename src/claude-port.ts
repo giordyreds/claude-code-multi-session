@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { Identity } from "./identity.js";
 
 /** Outcome of running a command to completion. */
 export interface ProcessResult {
@@ -33,14 +34,16 @@ export type InteractiveProcessRunner = (
   options: { env: NodeJS.ProcessEnv },
 ) => Promise<InteractiveProcessResult>;
 
-/** The (Account, Organization) identity `claude` reports for a Profile — see CONTEXT.md. */
-export interface AuthStatus {
-  loggedIn: boolean;
-  /** The Account's email, present only when `loggedIn`. */
-  email?: string;
-  /** The Organization's display name, present only when `loggedIn`. */
-  orgName?: string;
-}
+/**
+ * The (Account, Organization) identity `claude` reports for a Profile — see CONTEXT.md. Narrowed
+ * here, once, so `{ loggedIn: true }` with no Identity is a type error everywhere past this
+ * boundary (issue #48, ADR-0014): logged-out carries nothing to name, and logged-in carries either
+ * a complete Identity or `null` — `claude` reporting a login without naming both an Account and
+ * an Organization (CONTEXT.md's Observed identity). No module outside this one ever reads `.email`
+ * or `.orgName` off a status; they read `.identity` instead, already a whole {@link Identity} or
+ * nothing.
+ */
+export type AuthStatus = { loggedIn: false } | { loggedIn: true; identity: Identity | null };
 
 /**
  * The single port every invocation of the `claude` executable goes through — see ADR-0005.
@@ -212,11 +215,16 @@ function toAuthStatus(result: ProcessResult): AuthStatus {
   }
 
   const record = parsed as Record<string, unknown>;
-  return {
-    loggedIn: Boolean(record.loggedIn),
-    email: typeof record.email === "string" ? record.email : undefined,
-    orgName: typeof record.orgName === "string" ? record.orgName : undefined,
-  };
+  if (!record.loggedIn) return { loggedIn: false };
+
+  const email = typeof record.email === "string" ? record.email : undefined;
+  const orgName = typeof record.orgName === "string" ? record.orgName : undefined;
+  // A logged-in report missing either half is permitted by the real `claude auth status --json`
+  // in principle, even though it never actually happens in practice (issue #48) — narrowed to
+  // `null` here rather than a half-filled object, so nothing past this point can construct the
+  // impossible state `AuthStatus`'s type now rules out.
+  const identity: Identity | null = email !== undefined && orgName !== undefined ? { email, orgName } : null;
+  return { loggedIn: true, identity };
 }
 
 /** Renders a failed {@link ProcessResult} for an error message. Named to avoid shadowing vitest's `describe`, which every test file in this project imports. */

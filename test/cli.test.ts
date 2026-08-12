@@ -171,7 +171,7 @@ describe("runCli whoami", () => {
 
   it("reports '(default)' and the Default install's identity for an unbound shell", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "dev@example.com", orgName: "Acme Corp" } });
 
     const code = await runCli(["whoami"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
@@ -192,7 +192,7 @@ describe("runCli whoami", () => {
   it("reports the bound Profile's Alias (its config directory's basename) and resolved identity", async () => {
     const configDir = join(root, "work");
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
 
     const code = await runCli(["whoami"], {
       env: { CLAUDE_CONFIG_DIR: configDir },
@@ -222,13 +222,13 @@ describe("runCli whoami", () => {
     expect(stdout.join("\n")).toMatch(/\(not logged in\)/);
   });
 
-  it("never mislabels a logged-in Profile as '(not logged in)' just because email/orgName came back missing", async () => {
-    // A ClaudePort implementation could report loggedIn: true without email/orgName (the
+  it("never mislabels a logged-in Profile as '(not logged in)' just because identity came back null", async () => {
+    // A ClaudePort implementation could report loggedIn: true with identity: null (the
     // AuthStatus type permits it even though the real `claude auth status --json` always
-    // supplies both — see ADR-0005). "(not logged in)" would be an outright false statement
-    // here, not an honest fallback, so it must not be reused for this case.
+    // supplies both halves — see ADR-0014). "(not logged in)" would be an outright false
+    // statement here, not an honest fallback, so it must not be reused for this case.
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: null });
 
     const code = await runCli(["whoami"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
@@ -343,7 +343,7 @@ describe("runCli ls", () => {
 
   it("lists a never-logged-in Profile alongside the Default install, marked unmanaged", async () => {
     await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "dev@example.com", orgName: "Acme Corp" } });
 
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
     const code = await runCli(["ls"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
@@ -427,7 +427,7 @@ describe("runCli login", () => {
 
   it("auto-provisions a Profile that was never `ccp add`ed, under the same config directory `ccp add` would use", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
 
     const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
@@ -449,7 +449,7 @@ describe("runCli login", () => {
     await runCli(["add", "work"], { stateDir, installDir, stdout: () => {}, stderr: () => {} });
     const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
 
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
     const code = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort, stateDir, installDir });
 
     expect(code).toBe(0);
@@ -463,11 +463,11 @@ describe("runCli login", () => {
     });
   });
 
-  it("fails without recording anything when claude reports logged-in but omits email/orgName", async () => {
+  it("fails without recording anything when claude reports logged-in but identity is null", async () => {
     // AuthStatus's shape permits this even though the real `claude auth status --json` never
-    // does it (ADR-0005) — recording a placeholder here would fabricate Expected identity data.
+    // does it (ADR-0014) — recording a placeholder here would fabricate Expected identity data.
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: null });
 
     const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
@@ -480,7 +480,7 @@ describe("runCli login", () => {
 
   it("logs a Profile in, scoped to its own config directory, and records the resulting identity", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
 
     const code = await runCli(["login", "work"], { env: {}, stdout: stdoutFn, stderr: stderrFn, claudePort, stateDir, installDir });
 
@@ -542,7 +542,7 @@ describe("runCli login", () => {
     await writeFile(join(configDir, ".claude.json"), JSON.stringify({ oauthAccount: {} }), "utf8");
 
     try {
-      const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+      const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
       const code = await runCli(["login", "work"], {
         env: {},
         stdout: () => {},
@@ -577,7 +577,7 @@ describe("runCli login", () => {
 
   it("warns but still succeeds when the onboarding pre-seed fails unexpectedly", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
     const onboardingSeeder = async () => {
       throw new Error("disk full");
     };
@@ -603,11 +603,11 @@ describe("runCli login", () => {
     // Real registry file under a real temp stateDir (no fake) — only the unavoidable, unautomatable
     // part (the actual `claude auth login` browser flow) is faked. This is the isolation
     // acceptance criterion, verified against real behaviour rather than a fake.
-    const workPort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const workPort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
     const codeWork = await runCli(["login", "work"], { env: {}, stdout: () => {}, stderr: () => {}, claudePort: workPort, stateDir, installDir });
     expect(codeWork).toBe(0);
 
-    const personalPort = fakeClaudePort({ loggedIn: true, email: "me@example.com", orgName: "Personal Org" });
+    const personalPort = fakeClaudePort({ loggedIn: true, identity: { email: "me@example.com", orgName: "Personal Org" } });
     const codePersonal = await runCli(["login", "personal"], {
       env: {},
       stdout: () => {},
@@ -643,7 +643,7 @@ describe("runCli use", () => {
 
   it("fails without printing anything to stdout when the Alias is unknown", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "dev@example.com", orgName: "Acme Corp" } });
 
     const code = await runCli(["use", "ghost"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
@@ -662,12 +662,12 @@ describe("runCli use", () => {
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
     const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
 
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
 
     const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
@@ -688,7 +688,7 @@ describe("runCli use", () => {
         stderr: () => {},
         stateDir,
         installDir,
-        claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+        claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
       });
       // Two more registered Profiles besides the one being bound — the identity isolation Check
       // (`ccp doctor`, never `ccp use`) is the only Check allowed to spawn once per Profile; this
@@ -697,7 +697,7 @@ describe("runCli use", () => {
       await addProfile(stateDir, "side-project", installDir);
       const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
 
-      const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+      const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
 
       const code = await runCli(["use", "work"], { stateDir, stdout: () => {}, stderr: () => {}, claudePort });
 
@@ -728,12 +728,12 @@ describe("runCli use", () => {
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
     const { configDir } = (await loadRegistry(stateDir)).profiles.work!;
 
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "someone-else@example.com", orgName: "Other Org" } });
 
     const code = await runCli(["use", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
@@ -759,13 +759,13 @@ describe("runCli use", () => {
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
     await runCli(["use", "work"], {
       stateDir,
       stdout: () => {},
       stderr: () => {},
-      claudePort: fakeClaudePort({ loggedIn: true, email: "drifted@example.com", orgName: "Drifted Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "drifted@example.com", orgName: "Drifted Org" } }),
     });
     expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
 
@@ -774,7 +774,7 @@ describe("runCli use", () => {
       stateDir,
       stdout: () => {},
       stderr: stderrFn,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
 
     expect(code).toBe(0);
@@ -788,13 +788,13 @@ describe("runCli use", () => {
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
     await runCli(["use", "work"], {
       stateDir,
       stdout: () => {},
       stderr: () => {},
-      claudePort: fakeClaudePort({ loggedIn: true, email: "drifted@example.com", orgName: "Drifted Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "drifted@example.com", orgName: "Drifted Org" } }),
     });
     expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
 
@@ -808,6 +808,40 @@ describe("runCli use", () => {
 
     expect(code).toBe(0);
     expect(stderr.join("\n")).toMatch(/not logged in/i);
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
+  });
+
+  it("leaves a previously recorded Drift untouched when claude reports logged-in but identity: null — nothing was observed to disprove it (issue #48)", async () => {
+    // Distinct code path from the logged-out regression test above: here `status.loggedIn` is
+    // `true`, so `reportDriftAndUpdateRegistry` only stays a no-op because `compareToExpected`
+    // reports `comparable: false` for a null observed identity. Collapsing that into
+    // `drifted: false` instead — the exact bug a boolean-returning comparison would reintroduce —
+    // would silently clear this Profile's recorded Drift.
+    await runCli(["login", "work"], {
+      env: {},
+      stdout: () => {},
+      stderr: () => {},
+      stateDir,
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
+    });
+    await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: () => {},
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "drifted@example.com", orgName: "Drifted Org" } }),
+    });
+    expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
+
+    const { stderr, stderrFn } = captureLines();
+    const code = await runCli(["use", "work"], {
+      stateDir,
+      stdout: () => {},
+      stderr: stderrFn,
+      claudePort: fakeClaudePort({ loggedIn: true, identity: null }),
+    });
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
     expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
   });
 
@@ -862,13 +896,13 @@ describe("runCli ls (Drift marking)", () => {
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
     await runCli(["use", "work"], {
       stateDir,
       stdout: () => {},
       stderr: () => {},
-      claudePort: fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "someone-else@example.com", orgName: "Other Org" } }),
     });
 
     const { stdout, stdoutFn, stderrFn } = captureLines();
@@ -898,7 +932,7 @@ describe("runCli ls (Drift marking)", () => {
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
 
     const { stdout, stdoutFn, stderrFn } = captureLines();
@@ -935,7 +969,7 @@ describe("runCli reconcile", () => {
 
   it("fails for an unknown Alias", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "dev@example.com", orgName: "Acme Corp" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "dev@example.com", orgName: "Acme Corp" } });
 
     const code = await runCli(["reconcile", "ghost"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
@@ -950,18 +984,18 @@ describe("runCli reconcile", () => {
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
     await runCli(["use", "work"], {
       stateDir,
       stdout: () => {},
       stderr: () => {},
-      claudePort: fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "someone-else@example.com", orgName: "Other Org" } }),
     });
     expect((await loadRegistry(stateDir)).profiles.work?.drifted).toBe(true);
 
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "someone-else@example.com", orgName: "Other Org" } });
 
     const code = await runCli(["reconcile", "work"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
@@ -999,17 +1033,17 @@ describe("runCli reconcile", () => {
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } }),
     });
     await runCli(["login", "personal"], {
       env: {},
       stdout: () => {},
       stderr: () => {},
       stateDir,
-      claudePort: fakeClaudePort({ loggedIn: true, email: "me@example.com", orgName: "Personal Org" }),
+      claudePort: fakeClaudePort({ loggedIn: true, identity: { email: "me@example.com", orgName: "Personal Org" } }),
     });
 
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "someone-else@example.com", orgName: "Other Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "someone-else@example.com", orgName: "Other Org" } });
     const code = await runCli(["reconcile", "work"], { stateDir, stdout: () => {}, stderr: () => {}, claudePort });
 
     expect(code).toBe(0);
@@ -1699,7 +1733,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
     const claudePort: ClaudePort = {
       async login() {},
       async authStatus(configDir) {
-        if (configDir === workDir) return { loggedIn: true, email: "work@example.com", orgName: "Work Org" };
+        if (configDir === workDir) return { loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } };
         if (configDir === personalDir) return { loggedIn: false };
         throw new Error(`unexpected configDir '${configDir}'`);
       },
@@ -1726,7 +1760,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
       async login() {},
       async authStatus(configDir) {
         await delay(40);
-        return { loggedIn: true, email: `${configDir === workDir ? "work" : "personal"}@example.com`, orgName: "Org" };
+        return { loggedIn: true, identity: { email: `${configDir === workDir ? "work" : "personal"}@example.com`, orgName: "Org" } };
       },
       async version() {
         return "1.0.0 (Claude Code)";
@@ -1759,7 +1793,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
   it("prints only the resulting export to stdout once a Profile is chosen from the picker", async () => {
     const { configDir } = await addProfile(stateDir, "work", installDir);
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
     const picker = fakePicker(() => "work");
 
     const code = await runCli(["use"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort, picker });
@@ -1772,7 +1806,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
   it("leaves the shell unchanged when the picker is cancelled", async () => {
     await addProfile(stateDir, "work", installDir);
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
     const picker = fakePicker(() => undefined);
 
     const code = await runCli(["use"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort, picker });
@@ -1783,7 +1817,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
 
   it("fails with a clear message, without invoking the picker, when no Profiles are registered", async () => {
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: null });
     const picker = fakePicker(() => "irrelevant");
 
     const code = await runCli(["use"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort, picker });
@@ -1797,7 +1831,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
   it("fails without invoking the picker when the registry file is malformed", async () => {
     await writeFile(join(stateDir, "registry.json"), "not json", "utf8");
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: null });
     const picker = fakePicker(() => "irrelevant");
 
     const code = await runCli(["use"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort, picker });
@@ -1828,7 +1862,7 @@ describe("runCli use (interactive picker, no Alias given)", () => {
     // simulation of it.
     await addProfile(stateDir, "work", installDir);
     const { stdout, stderr, stdoutFn, stderrFn } = captureLines();
-    const claudePort = fakeClaudePort({ loggedIn: true, email: "work@example.com", orgName: "Work Org" });
+    const claudePort = fakeClaudePort({ loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } });
 
     const code = await runCli(["use"], { stateDir, stdout: stdoutFn, stderr: stderrFn, claudePort });
 
