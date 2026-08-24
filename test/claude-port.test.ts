@@ -40,7 +40,7 @@ describe("ClaudeCliPort.authStatus", () => {
     expect(capture.args).toEqual(["auth", "status", "--json"]);
   });
 
-  it("parses a logged-in response into Account (email) and Organization (orgName)", async () => {
+  it("parses a logged-in response into an Identity (Account email, Organization orgName)", async () => {
     const port = new ClaudeCliPort({
       run: fakeRun({
         stdout: JSON.stringify({
@@ -59,9 +59,20 @@ describe("ClaudeCliPort.authStatus", () => {
 
     await expect(port.authStatus()).resolves.toEqual({
       loggedIn: true,
-      email: "dev@example.com",
-      orgName: "Acme Corp",
+      identity: { email: "dev@example.com", orgName: "Acme Corp" },
     });
+  });
+
+  it("narrows a logged-in response missing email or orgName to identity: null (issue #48, ADR-0014)", async () => {
+    const port = new ClaudeCliPort({
+      run: fakeRun({
+        stdout: JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty" }),
+        stderr: "",
+        exitCode: 0,
+      }),
+    });
+
+    await expect(port.authStatus()).resolves.toEqual({ loggedIn: true, identity: null });
   });
 
   it("treats exit code 1 with a well-shaped logged-out response as success, not an error", async () => {

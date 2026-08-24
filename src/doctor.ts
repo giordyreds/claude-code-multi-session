@@ -334,9 +334,9 @@ export async function readFileOrEmpty(path: string): Promise<string> {
  * disagree too, not merely the observed ones to coincide.
  *
  * A Profile with no recorded Expected identity yet, or one that isn't currently logged in with
- * both an email and an orgName, has nothing to compare — the same posture `drift.ts`'s `isDrifted`
- * already takes toward a single Profile — so it's left out of every group entirely rather than
- * counted as a match or a mismatch.
+ * both an email and an orgName, has nothing to compare — the same posture `identity.ts`'s
+ * `compareToExpected` already takes toward a single Profile — so it's left out of every group
+ * entirely rather than counted as a match or a mismatch.
  */
 async function checkIdentityIsolation(stateDir: string, claudePort: ClaudePort): Promise<CheckOutcome> {
   const { profiles } = await loadRegistry(stateDir);
@@ -391,12 +391,11 @@ async function checkIdentityIsolation(stateDir: string, claudePort: ClaudePort):
     : { finding: warnings.join("; "), ok: false };
 }
 
-/** The Identity `status` reports, or `undefined` when there isn't a full pair to compare — a
- * Profile that's logged out, or one `claude` reports as logged in without both `email` and
- * `orgName` (permitted by {@link AuthStatus}'s shape — ADR-0005). */
+/** The Identity `status` reports, or `undefined` when there isn't one to compare — a Profile
+ * that's logged out, or one `claude` reports as logged in without naming both halves
+ * (`identity: null`, permitted by {@link AuthStatus}'s shape — ADR-0014). */
 function observedIdentity(status: AuthStatus): Identity | undefined {
-  if (!status.loggedIn || status.email === undefined || status.orgName === undefined) return undefined;
-  return { email: status.email, orgName: status.orgName };
+  return status.loggedIn ? status.identity ?? undefined : undefined;
 }
 
 /**
