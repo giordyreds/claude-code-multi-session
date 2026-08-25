@@ -16,7 +16,7 @@ export const LEGACY_STATE_DIR_NAME = ".ccacct";
 
 /** One Check's outcome (CONTEXT.md's **Check**): the Contract it verified, by name, what it
  * found, and whether it found a problem. `ccp doctor` (ticket #33) reports every Check through
- * this shape; `runDoctor` (`src/cli.ts`, issue #34) also reads `ok` across every report to decide
+ * this shape; `runDoctor` (`src/commands/machine.ts`, issue #34) also reads `ok` across every report to decide
  * whether this run actually verified anything worth recording as a Claude Code version — see
  * {@link recordVerifiedVersion}'s doc comment. */
 export interface CheckReport {
@@ -71,7 +71,7 @@ export interface DoctorContext {
  * read (`stat`, `readdir`, `readFile`) or a permission probe (`access`), never a write, a
  * `mkdir`, or a `rm`. Recording the Claude Code version this run last saw (ADR-0010's "honest
  * replacement for a matrix") is therefore deliberately kept out of this function — it's the one
- * genuine write in `ccp doctor`'s path, and it happens in `runDoctor` (`src/cli.ts`) instead, via
+ * genuine write in `ccp doctor`'s path, and it happens in `runDoctor` (`src/commands/machine.ts`) instead, via
  * {@link recordVerifiedVersion}, so this function's own "never writes to disk" stays true and
  * directly tested (see `doctor.test.ts`) rather than merely assumed.
  *
@@ -95,7 +95,7 @@ export async function runDoctorChecks(ctx: DoctorContext): Promise<CheckReport[]
 }
 
 /**
- * The two Contract names {@link CheckReport} reports that `ccp setup` (issue #35, `src/cli.ts`)
+ * The two Contract names {@link CheckReport} reports that `ccp setup` (issue #35, `src/commands/machine.ts`)
  * treats as fatal — exported as constants, rather than left as string literals `runSetup` would
  * have to retype, so a rename of either Check's name here can never silently desync from the rule
  * that reads it.
@@ -153,7 +153,7 @@ async function checkClaudeOnPath(env: NodeJS.ProcessEnv): Promise<CheckOutcome> 
 
 /** Either the Claude Code version {@link ClaudePort.version} resolved, or the failure to resolve
  * one — shared by {@link checkClaudeVersion} (which formats it into a finding) and `runDoctor`
- * (`src/cli.ts`, which needs the raw version itself to record it — see
+ * (`src/commands/machine.ts`, which needs the raw version itself to record it — see
  * {@link recordVerifiedVersion}) so both read `claude --version` through the exact same call
  * rather than one of them re-deriving success from the other's already-formatted string. */
 export type ClaudeVersionResolution = { ok: true; version: string } | { ok: false; error: string };
@@ -419,7 +419,7 @@ export async function loadVerifiedVersion(stateDir: string): Promise<string | nu
  * Records `version` as the Claude Code version `ccp doctor`'s Checks last **passed** against —
  * the "honest replacement for a matrix" ADR-0010 calls for: an account of what was actually
  * verified on this machine, in place of a table of untested combinations. `runDoctor` (`src/
- * cli.ts`) only calls this when every {@link CheckReport} from the same run reports `ok`, so a run
+ * commands/machine.ts`) only calls this when every {@link CheckReport} from the same run reports `ok`, so a run
  * that finds a real problem — lost isolation chief among them — never gets recorded as a version
  * this machine has verified; it falls back to whatever was last actually clean instead (issue
  * #34's "last **passed** against", not merely "last ran against"). The one deliberate write in
