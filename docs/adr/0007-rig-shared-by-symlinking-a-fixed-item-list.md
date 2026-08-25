@@ -22,7 +22,7 @@ so every ambient default is resolved once, in one place, and every other module 
 function of its inputs.
 
 **The Rig is a fixed list of six path segments**, matching CONTEXT.md's definition exactly:
-`CLAUDE.md` (instructions), `skills`, `plugins`, `hooks`, `agents`, `commands`. `shareRig`
+`CLAUDE.md` (instructions), `skills`, `plugins`, `hooks`, `agents`, `commands`. `repairRig`
 symlinks whichever of these exist directly under the Default install into a new Profile's
 config directory, one symlink per item, and skips any that don't exist — no error, no empty
 directory fabricated in its place. Spike 0001 found `agents` and `commands` absent from a real
@@ -54,7 +54,7 @@ being fixed and short, not of any separate isolation logic.
 ## Consequences
 
 - `addProfile` (`src/registry.ts`) takes `installDir` as a required parameter and calls
-  `shareRig` right after creating the new Profile's config directory, before registering it in
+  `repairRig` right after creating the new Profile's config directory, before registering it in
   the registry. Every path that creates a Profile — `ccp add`, and `ccp login` auto-provisioning
   one on the spot — shares the Rig identically, since both go through `addProfile`.
 - `runCli` (`src/cli.ts`) resolves `installDir` the same way it already resolves `stateDir`:
@@ -78,3 +78,10 @@ being fixed and short, not of any separate isolation logic.
 - Settings-file layering (ADR-0002's third row) is explicitly out of scope here: the Rig table
   and the Settings row are two different mechanisms in ADR-0002 for a reason, and this decision
   only implements the Rig row.
+
+## Amendment: `shareRig` is deleted; `addProfile` calls `repairRig` directly (#54)
+
+`shareRig` forwarded to `repairRig` and discarded its return value — a pure pass-through with no
+behaviour of its own once `repairRig` existed to serve `ccp sync`. `addProfile` now calls
+`repairRig` directly, as reflected above. Nothing about the decision this ADR records — a fixed
+six-item list, symlinked, skipping whatever's absent — changes; only the identifier does.

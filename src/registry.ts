@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isErrnoException } from "./fs-utils.js";
 import type { Identity } from "./identity.js";
-import { shareRig } from "./rig.js";
+import { repairRig } from "./rig.js";
 import { renderSettings } from "./settings.js";
 
 /** The settings file's name, both in the Default install and in every rendered Profile — the one
@@ -106,7 +106,7 @@ export async function addProfile(
 
   const configDir = join(stateDir, "profiles", alias);
   await mkdir(configDir, { recursive: true });
-  await shareRig(installDir, configDir);
+  await repairRig(installDir, configDir);
   await renderSettings({
     baseSettingsPath: join(installDir, SETTINGS_FILE_NAME),
     outputSettingsPath: join(configDir, SETTINGS_FILE_NAME),
