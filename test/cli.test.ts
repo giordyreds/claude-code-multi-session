@@ -6,9 +6,9 @@ import { defaultShellRcPath, runCli } from "../src/cli.js";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
 import type { CommandRunner } from "../src/command-runner.js";
 import type { DaemonPort } from "../src/daemon.js";
-import { SHELL_WIRING_LINE } from "../src/doctor.js";
 import type { Picker, PickerRow } from "../src/picker.js";
 import { addProfile, DEFAULT_INSTALL_ALIAS, loadRegistry, recordExpectedIdentity } from "../src/registry.js";
+import { SHELL_WIRING_LINE } from "../src/shell-wiring.js";
 
 /** Captures every line written to stdout/stderr, in order, for assertion. */
 function captureLines(): { stdout: string[]; stderr: string[]; stdoutFn: (line: string) => void; stderrFn: (line: string) => void } {

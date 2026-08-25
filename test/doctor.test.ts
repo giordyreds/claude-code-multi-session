@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AuthStatus, ClaudePort } from "../src/claude-port.js";
-import { LEGACY_STATE_DIR_NAME, runDoctorChecks, SHELL_WIRING_LINE, type DoctorContext } from "../src/doctor.js";
+import { LEGACY_STATE_DIR_NAME, runDoctorChecks, type DoctorContext } from "../src/doctor.js";
 import { addProfile, recordExpectedIdentity } from "../src/registry.js";
+import { SHELL_WIRING_LINE } from "../src/shell-wiring.js";
 
 function fakeClaudePort(version: string | Error = "2.1.224 (Claude Code)"): ClaudePort {
   return {
