@@ -203,7 +203,7 @@ const KNOWN_RIG_ITEMS = new Set<string>(RIG_ITEMS);
  * unrecognised — how a newly-invented kind of Claude Code configuration becomes visible instead
  * of being silently unshared (issue #28). Only ever reports this direction: a known Rig item
  * that's absent from the Default install is ordinary, already-established behaviour (Spike 0001,
- * ADR-0007's `shareRig`/`repairRig`) and is never named here.
+ * ADR-0007's `repairRig`) and is never named here.
  */
 async function checkRig(installDir: string): Promise<CheckOutcome> {
   let entries: string[];

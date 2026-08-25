@@ -6,19 +6,9 @@ import { isErrnoException } from "./fs-utils.js";
  * The Rig items shared from the Default install into every new Profile — see CONTEXT.md's
  * **Rig** and ADR-0007. Each is a path segment directly under a Claude Code configuration
  * directory. The spike (docs/spikes/0001) found `agents` and `commands` absent from a real
- * Default install, so an item's absence here is ordinary, not exceptional — see {@link shareRig}.
+ * Default install, so an item's absence here is ordinary, not exceptional — see {@link repairRig}.
  */
 export const RIG_ITEMS = ["CLAUDE.md", "skills", "plugins", "hooks", "agents", "commands"] as const;
-
-/**
- * Shares the Rig into `configDir` by symlinking each {@link RIG_ITEMS} entry that exists under
- * `installDir` — see ADR-0007. Delegates to {@link repairRig}, which only ever creates a symlink
- * where none exists yet, so this is exactly the original one-shot behaviour for the fresh config
- * directory `addProfile` always calls it with.
- */
-export async function shareRig(installDir: string, configDir: string): Promise<void> {
-  await repairRig(installDir, configDir);
-}
 
 /** Which {@link RIG_ITEMS} {@link repairRig} actually touched. */
 export interface RigRepairResult {
@@ -30,13 +20,14 @@ export interface RigRepairResult {
 
 /**
  * Brings `configDir`'s Rig symlinks back in line with `installDir` — `ccp sync`'s repair half of
- * ticket #12. Unlike the one-shot linking {@link shareRig} originally did, this is idempotent and
- * self-healing: an item already symlinked to the right place is left untouched (reported neither
- * repaired nor an error), a missing item is linked fresh, and anything else in its place — a
- * stale symlink to a since-removed install, or a plain file/directory — is replaced. An item
- * absent from the Default install is skipped exactly as {@link shareRig} always skipped it (Spike
- * 0001's `agents`/`commands` finding), regardless of whatever configDir currently holds for it:
- * repair never fabricates an item the install itself doesn't have.
+ * ticket #12, and also what `addProfile` calls directly to share the Rig into a fresh Profile's
+ * config directory for the first time (ADR-0007). It's idempotent and self-healing either way: an
+ * item already symlinked to the right place is left untouched (reported neither repaired nor an
+ * error), a missing item is linked fresh, and anything else in its place — a stale symlink to a
+ * since-removed install, or a plain file/directory — is replaced. An item absent from the Default
+ * install is skipped, no error (Spike 0001's `agents`/`commands` finding), regardless of whatever
+ * configDir currently holds for it: repair never fabricates an item the install itself doesn't
+ * have.
  *
  * Also recreates `configDir` itself if it's gone missing entirely, matching `addProfile`'s own
  * `mkdir` — a Profile whose directory was deleted out from under it is exactly the "missing

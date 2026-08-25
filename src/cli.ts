@@ -859,8 +859,8 @@ async function pickAlias(registry: Registry, deps: CliDeps): Promise<string | un
  *
  * "What was skipped" (this ticket's own words) means a whole Profile `sync` couldn't act on, not
  * an individual Rig item absent from the Default install: {@link repairRig} already treats that
- * as ordinary, silent-by-design state (Spike 0001's `agents`/`commands` finding, same as
- * {@link shareRig} before it), and naming it in every Profile's line on every run would turn
+ * as ordinary, silent-by-design state (Spike 0001's `agents`/`commands` finding, same as it always
+ * has for `addProfile`), and naming it in every Profile's line on every run would turn
  * permanently-normal state into noise that drowns out the one line that actually needs attention.
  */
 async function runSync(_args: string[], deps: CliDeps): Promise<number> {
