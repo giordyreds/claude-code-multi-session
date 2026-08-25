@@ -2,8 +2,8 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SHELL_WIRING_LINE } from "../src/doctor.js";
 import { removeShellWiringLine, writeShellWiringLine } from "../src/setup.js";
+import { SHELL_WIRING_LINE } from "../src/shell-wiring.js";
 
 describe("writeShellWiringLine", () => {
   let root: string;

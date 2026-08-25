@@ -2,21 +2,12 @@ import { constants } from "node:fs";
 import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 import type { AuthStatus, ClaudePort } from "./claude-port.js";
-import { isErrnoException } from "./fs-utils.js";
+import { errorMessage, isErrnoException, isPlainObject } from "./fs-utils.js";
 import { formatIdentity, identityKey, type Identity } from "./identity.js";
 import { onboardingSourceReady } from "./onboarding.js";
 import { loadRegistry } from "./registry.js";
 import { RIG_ITEMS } from "./rig.js";
-
-/**
- * The exact guarded line Setup (CONTEXT.md) adds to a shell startup file (`.zshrc` or `.bashrc`,
- * see `defaultShellRcPath`, `src/cli.ts`, issue #40) — README.md's install instructions,
- * ADR-0004's Amendment 1 (issue #32). `ccp doctor`'s Shell wiring Check looks for this precise
- * text and prints it verbatim when it's missing, so what a user is told to add is exactly what
- * Setup would have added — one source of truth for the line, not two. Plain POSIX `sh`, needing
- * no bash/zsh distinction of its own.
- */
-export const SHELL_WIRING_LINE = 'if command -v ccp >/dev/null 2>&1; then eval "$(command ccp shell-init)"; fi';
+import { isPresent, SHELL_WIRING_LINE } from "./shell-wiring.js";
 
 /** The state directory's name from before the rename (issue #31): `~/.ccacct`, now `~/.ccp`. The
  * Legacy state directory Check looks for a directory under this old name — detection only, never
@@ -25,7 +16,7 @@ export const LEGACY_STATE_DIR_NAME = ".ccacct";
 
 /** One Check's outcome (CONTEXT.md's **Check**): the Contract it verified, by name, what it
  * found, and whether it found a problem. `ccp doctor` (ticket #33) reports every Check through
- * this shape; `runDoctor` (`src/cli.ts`, issue #34) also reads `ok` across every report to decide
+ * this shape; `runDoctor` (`src/commands/machine.ts`, issue #34) also reads `ok` across every report to decide
  * whether this run actually verified anything worth recording as a Claude Code version — see
  * {@link recordVerifiedVersion}'s doc comment. */
 export interface CheckReport {
@@ -80,7 +71,7 @@ export interface DoctorContext {
  * read (`stat`, `readdir`, `readFile`) or a permission probe (`access`), never a write, a
  * `mkdir`, or a `rm`. Recording the Claude Code version this run last saw (ADR-0010's "honest
  * replacement for a matrix") is therefore deliberately kept out of this function — it's the one
- * genuine write in `ccp doctor`'s path, and it happens in `runDoctor` (`src/cli.ts`) instead, via
+ * genuine write in `ccp doctor`'s path, and it happens in `runDoctor` (`src/commands/machine.ts`) instead, via
  * {@link recordVerifiedVersion}, so this function's own "never writes to disk" stays true and
  * directly tested (see `doctor.test.ts`) rather than merely assumed.
  *
@@ -104,7 +95,7 @@ export async function runDoctorChecks(ctx: DoctorContext): Promise<CheckReport[]
 }
 
 /**
- * The two Contract names {@link CheckReport} reports that `ccp setup` (issue #35, `src/cli.ts`)
+ * The two Contract names {@link CheckReport} reports that `ccp setup` (issue #35, `src/commands/machine.ts`)
  * treats as fatal — exported as constants, rather than left as string literals `runSetup` would
  * have to retype, so a rename of either Check's name here can never silently desync from the rule
  * that reads it.
@@ -162,7 +153,7 @@ async function checkClaudeOnPath(env: NodeJS.ProcessEnv): Promise<CheckOutcome> 
 
 /** Either the Claude Code version {@link ClaudePort.version} resolved, or the failure to resolve
  * one — shared by {@link checkClaudeVersion} (which formats it into a finding) and `runDoctor`
- * (`src/cli.ts`, which needs the raw version itself to record it — see
+ * (`src/commands/machine.ts`, which needs the raw version itself to record it — see
  * {@link recordVerifiedVersion}) so both read `claude --version` through the exact same call
  * rather than one of them re-deriving success from the other's already-formatted string. */
 export type ClaudeVersionResolution = { ok: true; version: string } | { ok: false; error: string };
@@ -203,7 +194,7 @@ const KNOWN_RIG_ITEMS = new Set<string>(RIG_ITEMS);
  * unrecognised — how a newly-invented kind of Claude Code configuration becomes visible instead
  * of being silently unshared (issue #28). Only ever reports this direction: a known Rig item
  * that's absent from the Default install is ordinary, already-established behaviour (Spike 0001,
- * ADR-0007's `shareRig`/`repairRig`) and is never named here.
+ * ADR-0007's `repairRig`) and is never named here.
  */
 async function checkRig(installDir: string): Promise<CheckOutcome> {
   let entries: string[];
@@ -289,32 +280,9 @@ async function checkLegacyStateDir(legacyStateDir: string, currentStateDir: stri
  * "could not be checked" finding, so nothing here can take the rest of the report down.
  */
 async function checkShellWiring(shellRcPath: string): Promise<CheckOutcome> {
-  return (await shellWiringPresent(shellRcPath))
+  return (await isPresent(shellRcPath))
     ? { finding: `present in ${shellRcPath}`, ok: true }
     : { finding: `missing from ${shellRcPath} — add this line:\n  ${SHELL_WIRING_LINE}`, ok: false };
-}
-
-/**
- * Whether {@link SHELL_WIRING_LINE} is already present in `shellRcPath` — the one predicate this
- * Check, `setup.ts`'s write/remove, and `ccp setup`'s `--dry-run` preview (`src/cli.ts`) all need,
- * shared here so "present" can never mean something subtly different at one of those call sites
- * than at another.
- */
-export async function shellWiringPresent(shellRcPath: string): Promise<boolean> {
-  return (await readFileOrEmpty(shellRcPath)).includes(SHELL_WIRING_LINE);
-}
-
-/** Reads `path`, resolving `""` when it doesn't exist rather than throwing — shared with
- * `setup.ts`, which needs the exact same "missing file reads as empty" semantics to decide
- * whether {@link SHELL_WIRING_LINE} is already present before writing or removing it, so Setup
- * and this Check can never disagree about what "present" means. */
-export async function readFileOrEmpty(path: string): Promise<string> {
-  try {
-    return await readFile(path, "utf8");
-  } catch (err) {
-    if (isErrnoException(err) && err.code === "ENOENT") return "";
-    throw err;
-  }
 }
 
 /**
@@ -414,10 +382,6 @@ async function isDirectory(path: string): Promise<boolean> {
   }
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 /** The file `ccp doctor` records the Claude Code version its Checks last ran against — a small,
  * dedicated state file under the tool's own state directory, deliberately separate from
  * `registry.json` (`registry.ts`): this records what a run of `ccp doctor` last saw on this
@@ -455,7 +419,7 @@ export async function loadVerifiedVersion(stateDir: string): Promise<string | nu
  * Records `version` as the Claude Code version `ccp doctor`'s Checks last **passed** against —
  * the "honest replacement for a matrix" ADR-0010 calls for: an account of what was actually
  * verified on this machine, in place of a table of untested combinations. `runDoctor` (`src/
- * cli.ts`) only calls this when every {@link CheckReport} from the same run reports `ok`, so a run
+ * commands/machine.ts`) only calls this when every {@link CheckReport} from the same run reports `ok`, so a run
  * that finds a real problem — lost isolation chief among them — never gets recorded as a version
  * this machine has verified; it falls back to whatever was last actually clean instead (issue
  * #34's "last **passed** against", not merely "last ran against"). The one deliberate write in
@@ -465,8 +429,4 @@ export async function loadVerifiedVersion(stateDir: string): Promise<string | nu
 export async function recordVerifiedVersion(stateDir: string, version: string): Promise<void> {
   await mkdir(stateDir, { recursive: true });
   await writeFile(verifiedVersionPath(stateDir), `${JSON.stringify({ version }, null, 2)}\n`, "utf8");
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
