@@ -13,8 +13,6 @@ import {
   recordVerifiedVersion,
   resolveClaudeVersion,
   runDoctorChecks,
-  SHELL_WIRING_LINE,
-  shellWiringPresent,
 } from "./doctor.js";
 import { compareToExpected, formatIdentity } from "./identity.js";
 import { seedOnboardingState, type OnboardingSeeder } from "./onboarding.js";
@@ -33,6 +31,7 @@ import { repairRig } from "./rig.js";
 import { renderSettings } from "./settings.js";
 import { removeShellWiringLine, writeShellWiringLine } from "./setup.js";
 import { shellInitScript } from "./shell-init.js";
+import { isPresent, SHELL_WIRING_LINE } from "./shell-wiring.js";
 import { packageVersion } from "./version.js";
 
 const USAGE =
@@ -966,7 +965,7 @@ async function runSetup(args: string[], deps: CliDeps): Promise<number> {
   if (args.includes("--dry-run")) {
     let present: boolean;
     try {
-      present = await shellWiringPresent(deps.shellRcPath);
+      present = await isPresent(deps.shellRcPath);
     } catch (err) {
       return reportError(deps.stderr, err);
     }

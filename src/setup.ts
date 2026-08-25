@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { readFileOrEmpty, SHELL_WIRING_LINE } from "./doctor.js";
+import { readFileOrEmpty, SHELL_WIRING_LINE } from "./shell-wiring.js";
 
 /**
  * `ccp setup`'s and `ccp teardown`'s shared building block (issue #35): adding and removing
