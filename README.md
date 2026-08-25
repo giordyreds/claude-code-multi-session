@@ -72,31 +72,14 @@ standalone `ccp` executable with the JavaScript runtime baked in — no Node.js,
 `ccp` itself supports macOS and Linux, bash or zsh (see [Scope](#scope)); the release
 pipeline also builds musl variants of the Linux binaries, for Alpine-style distros.
 
-**While this repository is private** (true today), the asset needs an authenticated
-request — a plain `curl` gets a 404, indistinguishable from the asset not existing,
-whether or not you're logged in to GitHub anywhere else.
-[`gh`](https://cli.github.com/), already authenticated (`gh auth login`), carries that
-authentication for you — that's the command under each platform below.
-
-**If this repository is ever made public**, a plain `curl` works and needs nothing but a
-shell — that's the collapsed "If this repository is ever made public" block under each
-platform's `gh` command. (It fails with the same 404 today, for the reason above — this
-isn't a broken command, it's what a private repo does to an unauthenticated request.)
+This repository is public, so a plain `curl` works and needs nothing but a shell — no
+`gh`, no GitHub login, no token. Each command below downloads the release, unpacks it,
+and moves the `ccp` binary onto your `PATH` in one go.
 
 In every command below, swap `vX.Y.Z` for the release you want — see
 [Pinning a version](#pinning-a-version) below.
 
 ### macOS (Apple Silicon)
-
-```sh
-gh release download vX.Y.Z \
-  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-darwin-arm64.tar.gz"
-tar -xzf ccp-*-darwin-arm64.tar.gz
-sudo mv ccp /usr/local/bin/
-```
-
-<details>
-<summary>If this repository is ever made public</summary>
 
 ```sh
 curl -fsSL -o ccp.tar.gz \
@@ -105,19 +88,7 @@ tar -xzf ccp.tar.gz
 sudo mv ccp /usr/local/bin/
 ```
 
-</details>
-
 ### macOS (Intel)
-
-```sh
-gh release download vX.Y.Z \
-  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-darwin-x64.tar.gz"
-tar -xzf ccp-*-darwin-x64.tar.gz
-sudo mv ccp /usr/local/bin/
-```
-
-<details>
-<summary>If this repository is ever made public</summary>
 
 ```sh
 curl -fsSL -o ccp.tar.gz \
@@ -126,19 +97,7 @@ tar -xzf ccp.tar.gz
 sudo mv ccp /usr/local/bin/
 ```
 
-</details>
-
 ### Linux (x64)
-
-```sh
-gh release download vX.Y.Z \
-  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-linux-x64.tar.gz"
-tar -xzf ccp-*-linux-x64.tar.gz
-sudo mv ccp /usr/local/bin/
-```
-
-<details>
-<summary>If this repository is ever made public</summary>
 
 ```sh
 curl -fsSL -o ccp.tar.gz \
@@ -147,19 +106,7 @@ tar -xzf ccp.tar.gz
 sudo mv ccp /usr/local/bin/
 ```
 
-</details>
-
 ### Linux (arm64)
-
-```sh
-gh release download vX.Y.Z \
-  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-linux-arm64.tar.gz"
-tar -xzf ccp-*-linux-arm64.tar.gz
-sudo mv ccp /usr/local/bin/
-```
-
-<details>
-<summary>If this repository is ever made public</summary>
 
 ```sh
 curl -fsSL -o ccp.tar.gz \
@@ -167,8 +114,6 @@ curl -fsSL -o ccp.tar.gz \
 tar -xzf ccp.tar.gz
 sudo mv ccp /usr/local/bin/
 ```
-
-</details>
 
 ### Windows (via WSL)
 
