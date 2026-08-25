@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isErrnoException } from "./fs-utils.js";
+import type { Identity } from "./identity.js";
 import { shareRig } from "./rig.js";
 import { renderSettings } from "./settings.js";
 
@@ -8,19 +9,14 @@ import { renderSettings } from "./settings.js";
  * name Claude Code itself reads (ADR-0002). */
 const SETTINGS_FILE_NAME = "settings.json";
 
-/** The (Account, Organization) a Profile is recorded as resolving to — see CONTEXT.md's
- * **Expected identity**. `null` until something (`ccp login`, or a future Reconciliation command)
- * records one; that is the ordinary state for every freshly-added Profile. */
-export interface ExpectedIdentity {
-  email: string;
-  orgName: string;
-}
-
 /** A managed Profile's registry entry. Alias is the key it's stored under, not a field here —
  * same "no separately stored field" shape ADR-0005 already committed to for the bare Alias. */
 export interface ProfileRecord {
   configDir: string;
-  expectedIdentity: ExpectedIdentity | null;
+  /** The Identity this Profile is recorded as resolving to — see CONTEXT.md's **Expected
+   * identity**. `null` until something (`ccp login`, or `ccp reconcile`) records one; that is
+   * the ordinary state for every freshly-added Profile. */
+  expectedIdentity: Identity | null;
   /** Whether Binding last observed this Profile's identity diverging from its Expected identity
    * — see CONTEXT.md's Drift. Recorded here so `ccp ls` (ticket #8) can mark drifted Profiles
    * from stored state alone, without an API call to re-check whether a token still works. */
@@ -85,7 +81,7 @@ export async function saveRegistry(stateDir: string, registry: Registry): Promis
  * Creates a Profile named `alias`: an isolated configuration directory under `stateDir` with the
  * Rig shared into it from `installDir` (ADR-0007) and its settings rendered from the Default
  * install's base (ADR-0002) — including the status-line Alias indicator ticket #10 requires a
- * running Session to show — registered in the registry with no {@link ExpectedIdentity} yet.
+ * running Session to show — registered in the registry with no Expected {@link Identity} yet.
  * Checks for a duplicate Alias before touching the filesystem or the registry, so a rejected
  * `add` changes nothing.
  */
@@ -135,7 +131,7 @@ export async function addProfile(
 export async function recordExpectedIdentity(
   stateDir: string,
   alias: string,
-  identity: ExpectedIdentity,
+  identity: Identity,
 ): Promise<void> {
   const registry = await loadRegistry(stateDir);
   const record = registry.profiles[alias];
@@ -262,7 +258,7 @@ function validateDrifted(value: unknown, alias: string, path: string): boolean {
   return value;
 }
 
-function validateExpectedIdentity(value: unknown, alias: string, path: string): ExpectedIdentity | null {
+function validateExpectedIdentity(value: unknown, alias: string, path: string): Identity | null {
   if (value === null || value === undefined) return null;
 
   if (!isPlainObject(value) || typeof value.email !== "string" || typeof value.orgName !== "string") {

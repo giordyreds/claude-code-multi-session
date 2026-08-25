@@ -332,8 +332,8 @@ describe("runDoctorChecks", () => {
       await recordExpectedIdentity(stateDir, "personal", { email: "personal@example.com", orgName: "Personal Org" });
 
       const claudePort = fakeClaudePortByConfigDir({
-        [workDir]: { loggedIn: true, email: "work@example.com", orgName: "Work Org" },
-        [personalDir]: { loggedIn: true, email: "personal@example.com", orgName: "Personal Org" },
+        [workDir]: { loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } },
+        [personalDir]: { loggedIn: true, identity: { email: "personal@example.com", orgName: "Personal Org" } },
       });
 
       const reports = await runDoctorChecks(context({ claudePort }));
@@ -350,8 +350,8 @@ describe("runDoctorChecks", () => {
       // Both Profiles now observe 'work@example.com' — as if the config-directory variable
       // stopped isolating 'personal' from 'work' entirely.
       const claudePort = fakeClaudePortByConfigDir({
-        [workDir]: { loggedIn: true, email: "work@example.com", orgName: "Work Org" },
-        [personalDir]: { loggedIn: true, email: "work@example.com", orgName: "Work Org" },
+        [workDir]: { loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } },
+        [personalDir]: { loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } },
       });
 
       const reports = await runDoctorChecks(context({ claudePort }));
@@ -372,8 +372,8 @@ describe("runDoctorChecks", () => {
       // Both Profiles are recorded as expecting the same Account on purpose, and both currently
       // match it — never the pattern this Check exists to catch.
       const claudePort = fakeClaudePortByConfigDir({
-        [workDir]: { loggedIn: true, email: "shared@example.com", orgName: "Shared Org" },
-        [ciDir]: { loggedIn: true, email: "shared@example.com", orgName: "Shared Org" },
+        [workDir]: { loggedIn: true, identity: { email: "shared@example.com", orgName: "Shared Org" } },
+        [ciDir]: { loggedIn: true, identity: { email: "shared@example.com", orgName: "Shared Org" } },
       });
 
       const reports = await runDoctorChecks(context({ claudePort }));
@@ -388,7 +388,7 @@ describe("runDoctorChecks", () => {
       const { configDir: freshDir } = await addProfile(stateDir, "fresh", installDir);
 
       const claudePort = fakeClaudePortByConfigDir({
-        [workDir]: { loggedIn: true, email: "work@example.com", orgName: "Work Org" },
+        [workDir]: { loggedIn: true, identity: { email: "work@example.com", orgName: "Work Org" } },
         [freshDir]: { loggedIn: false },
       });
 

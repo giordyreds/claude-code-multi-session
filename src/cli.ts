@@ -15,7 +15,7 @@ import {
   SHELL_WIRING_LINE,
   shellWiringPresent,
 } from "./doctor.js";
-import { isDrifted } from "./drift.js";
+import { compareToExpected, formatIdentity } from "./identity.js";
 import { seedOnboardingState, type OnboardingSeeder } from "./onboarding.js";
 import { TtyPicker, type Picker, type PickerRow } from "./picker.js";
 import {
@@ -25,7 +25,6 @@ import {
   recordDrift,
   recordExpectedIdentity,
   removeProfile,
-  type ExpectedIdentity,
   type ProfileRecord,
   type Registry,
 } from "./registry.js";
@@ -288,7 +287,7 @@ async function runWhoami(deps: CliDeps): Promise<number> {
     return reportError(deps.stderr, err);
   }
 
-  deps.stdout(formatIdentity(alias, status));
+  deps.stdout(formatIdentityReport(alias, status));
   return 0;
 }
 
@@ -371,18 +370,18 @@ async function runLogin(
     return 1;
   }
 
-  // A logged-in status without both fields is permitted by AuthStatus's shape (ADR-0005), even
-  // though the real `claude auth status --json` never omits them. Recording a placeholder in
-  // their place would fabricate Expected identity data instead of honestly reporting the gap, so
-  // this fails loudly rather than persisting anything.
-  if (status.email === undefined || status.orgName === undefined) {
+  // `identity: null` is permitted by AuthStatus's shape (ADR-0014), even though the real `claude
+  // auth status --json` never actually omits either field. Recording a placeholder in their place
+  // would fabricate Expected identity data instead of honestly reporting the gap, so this fails
+  // loudly rather than persisting anything.
+  if (status.identity === null) {
     deps.stderr(`'${alias}' logged in, but claude did not report an Account email or Organization — nothing was recorded.`);
     return 1;
   }
 
-  await recordExpectedIdentity(deps.stateDir, alias, { email: status.email, orgName: status.orgName });
+  await recordExpectedIdentity(deps.stateDir, alias, status.identity);
 
-  deps.stdout(formatIdentity(alias, status));
+  deps.stdout(formatIdentityReport(alias, status));
   return 0;
 }
 
@@ -544,11 +543,14 @@ async function runRun(args: string[], deps: CliDeps): Promise<number> {
  * without ever blocking Binding — and persists the resulting Drift state (ticket #8) so `ccp ls`
  * can mark it later from stored state alone, with no live check of its own.
  *
- * Only ever touches the stored `drifted` flag when this check actually had enough to compare —
- * an Expected identity on record *and* a fully-reported observed identity. A Profile that's
- * logged out, or one `claude` reports as logged in without email/orgName (permitted by
- * {@link AuthStatus}'s shape — ADR-0005), leaves whatever Drift state was already recorded
- * exactly as it was: there is nothing observed to prove it's still drifted, or to prove it isn't.
+ * Only ever touches the stored `drifted` flag when {@link compareToExpected} reports
+ * `comparable: true` — an Expected identity on record *and* an Observed identity to compare it
+ * against. A Profile that's logged out, or one `claude` reports as logged in without naming both
+ * halves (`identity: null`, ADR-0014), leaves whatever Drift state was already recorded exactly
+ * as it was: there is nothing observed to prove it's still drifted, or to prove it isn't. This is
+ * the entire reason {@link compareToExpected} returns a three-state verdict rather than a
+ * boolean — collapsing "not comparable" into `false` here would silently clear a recorded drift
+ * flag on every logged-out Profile `ccp use` binds to.
  */
 async function reportDriftAndUpdateRegistry(
   deps: { stateDir: string; stderr: (line: string) => void },
@@ -561,25 +563,37 @@ async function reportDriftAndUpdateRegistry(
     return;
   }
 
-  const { expectedIdentity } = record;
-  const { email, orgName } = status;
-  if (!expectedIdentity || email === undefined || orgName === undefined) {
+  const expected = record.expectedIdentity;
+  const observed = status.identity;
+  // Compiler-checked narrowing: `expected`/`observed` must both be non-null past this guard for
+  // `formatIdentity` below to even type-check — no hand-written `=== undefined` field checks
+  // (issue #48). `compareToExpected` would report `comparable: false` for this same pair; this
+  // guard exists anyway so TypeScript itself, not a convention, rules out the drift message
+  // below ever running against a half-formed pair.
+  if (!expected || !observed) {
     return;
   }
 
-  const drifted = isDrifted(expectedIdentity, status);
-  if (drifted) {
+  const verdict = compareToExpected(expected, observed);
+  if (!verdict.comparable) {
+    // Unreachable given the guard above — `expected`/`observed` are both non-null here, so
+    // `compareToExpected` always reports `comparable: true`. Kept as a real check, not an
+    // assertion, so this function still type-checks against `DriftVerdict`'s shape on its own.
+    return;
+  }
+
+  if (verdict.drifted) {
     // Prominent and names both identities, per ticket #8's acceptance criteria — this is the
     // moment that catches "someone logged in directly while a shell was bound" before it bills
     // the wrong Organization.
     deps.stderr(`!!! DRIFT DETECTED for Profile '${alias}' !!!`);
-    deps.stderr(`  Expected identity: ${formatAccountAndOrg(expectedIdentity)}`);
-    deps.stderr(`  Observed identity: ${formatAccountAndOrg({ email, orgName })}`);
+    deps.stderr(`  Expected identity: ${formatIdentity(expected)}`);
+    deps.stderr(`  Observed identity: ${formatIdentity(observed)}`);
     deps.stderr(`Binding '${alias}' anyway. Run 'ccp reconcile ${alias}' if the observed identity is now correct.`);
   }
 
-  if (drifted !== record.drifted) {
-    await recordDrift(deps.stateDir, alias, drifted);
+  if (verdict.drifted !== record.drifted) {
+    await recordDrift(deps.stateDir, alias, verdict.drifted);
   }
 }
 
@@ -613,15 +627,14 @@ async function runReconcile(
     deps.stderr(`Cannot reconcile '${alias}': it is not logged in, so there is no observed identity to accept as truth.`);
     return 1;
   }
-  if (status.email === undefined || status.orgName === undefined) {
+  if (status.identity === null) {
     deps.stderr(`Cannot reconcile '${alias}': claude did not report an Account email or Organization.`);
     return 1;
   }
 
-  const identity: ExpectedIdentity = { email: status.email, orgName: status.orgName };
-  await recordExpectedIdentity(deps.stateDir, alias, identity);
+  await recordExpectedIdentity(deps.stateDir, alias, status.identity);
 
-  deps.stdout(`Reconciled '${alias}': Expected identity is now ${formatAccountAndOrg(identity)}.`);
+  deps.stdout(`Reconciled '${alias}': Expected identity is now ${formatIdentity(status.identity)}.`);
   return 0;
 }
 
@@ -695,14 +708,18 @@ async function runRm(args: string[], deps: CliDeps): Promise<number> {
 /**
  * Renders an identity report shared by `whoami` and `login`. Account/Organization fall back to
  * an explicit `(not logged in)` — a Profile can be Bound but not logged in (CONTEXT.md's Login)
- * — rather than ever printing a blank. A logged-in status missing its email/orgName (permitted
- * by {@link AuthStatus}'s shape, even though the real `claude auth status --json` always
- * supplies both — ADR-0005) falls back to `(unknown)` instead: reusing `(not logged in)` there
+ * — rather than ever printing a blank. A logged-in status with `identity: null` (permitted by
+ * {@link AuthStatus}'s shape, even though the real `claude auth status --json` always supplies
+ * both halves — ADR-0014) falls back to `(unknown)` instead: reusing `(not logged in)` there
  * would be an outright false statement, not an honest fallback.
+ *
+ * Distinct from `identity.ts`'s {@link formatIdentity}: this also names the Alias and lays the
+ * pair out across separate lines, rather than rendering the "email (orgName)" shape that function
+ * owns.
  */
-function formatIdentity(alias: string, status: AuthStatus): string {
-  const account = !status.loggedIn ? NOT_LOGGED_IN : status.email ?? UNKNOWN;
-  const organization = !status.loggedIn ? NOT_LOGGED_IN : status.orgName ?? UNKNOWN;
+function formatIdentityReport(alias: string, status: AuthStatus): string {
+  const account = !status.loggedIn ? NOT_LOGGED_IN : status.identity?.email ?? UNKNOWN;
+  const organization = !status.loggedIn ? NOT_LOGGED_IN : status.identity?.orgName ?? UNKNOWN;
   return [`Alias:        ${alias}`, `Account:      ${account}`, `Organization: ${organization}`].join("\n");
 }
 
@@ -757,7 +774,7 @@ async function runLs(deps: CliDeps): Promise<number> {
   const lines = Object.entries(profiles)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([alias, record]) => {
-      const identity = record.expectedIdentity ? formatAccountAndOrg(record.expectedIdentity) : NEVER_LOGGED_IN;
+      const identity = record.expectedIdentity ? formatIdentity(record.expectedIdentity) : NEVER_LOGGED_IN;
       const driftMarker = record.drifted ? ` ${DRIFTED_MARKER}` : "";
       return `${alias}: ${identity}${driftMarker}`;
     });
@@ -775,20 +792,18 @@ async function runLs(deps: CliDeps): Promise<number> {
   return 0;
 }
 
-/** Renders an (Account, Organization) pair the way both a recorded Expected identity and a live
- * {@link AuthStatus} are shown in `ccp ls` (and a Drift warning in `ccp use`) — the one shape
- * every call site shares. */
-function formatAccountAndOrg(identity: { email: string; orgName: string }): string {
-  return `${identity.email} (${identity.orgName})`;
-}
-
-/** Renders a live {@link AuthStatus} the way `ccp ls`'s Default-install row and the picker's rows
+/**
+ * Renders a live {@link AuthStatus} the way `ccp ls`'s Default-install row and the picker's rows
  * (ticket #9) both need it: an explicit `(not logged in)` rather than a blank, otherwise the
- * resolved Account/Organization pair. */
+ * resolved Account/Organization pair, via `identity.ts`'s {@link formatIdentity}. A logged-in
+ * status with `identity: null` renders as a single `(unknown)` rather than `formatIdentity`'s
+ * "email (orgName)" shape fed two placeholders — issue #48's accepted, user-visible behaviour
+ * change from the previous `(unknown) ((unknown))`, since there is exactly one unknown here
+ * (no Observed identity at all), not two separately unknown halves.
+ */
 function formatLiveIdentity(status: AuthStatus): string {
-  return !status.loggedIn
-    ? NOT_LOGGED_IN
-    : formatAccountAndOrg({ email: status.email ?? UNKNOWN, orgName: status.orgName ?? UNKNOWN });
+  if (!status.loggedIn) return NOT_LOGGED_IN;
+  return status.identity ? formatIdentity(status.identity) : UNKNOWN;
 }
 
 /**
