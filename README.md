@@ -12,6 +12,23 @@ run it inside WSL — WSL is Linux as far as `ccp` is concerned, and native Wind
 every subcommand fails fast on `win32` with a clear message instead of a confusing path or
 permissions error.
 
+## Table of Contents
+
+- [Concepts](#concepts)
+- [Install](#install)
+  - [macOS (Apple Silicon)](#macos-apple-silicon)
+  - [macOS (Intel)](#macos-intel)
+  - [Linux (x64)](#linux-x64)
+  - [Linux (arm64)](#linux-arm64)
+  - [Windows (via WSL)](#windows-via-wsl)
+  - [Setup](#setup)
+  - [Pinning a version](#pinning-a-version)
+- [Usage](#usage)
+- [Uninstall](#uninstall)
+- [Scope](#scope)
+- [Releases](#releases)
+- [Development](#development)
+
 ## Concepts
 
 - **Profile** — a named, isolated Claude Code identity. Resolves to one (Account,
@@ -42,35 +59,7 @@ recorded as ADRs in [`docs/adr/`](./docs/adr/).
 
 Each [release](https://github.com/giordyreds/claude-code-multi-session/releases) ships a
 standalone `ccp` executable with the JavaScript runtime baked in — no Node.js, no
-`npm install`. Grab the asset for your platform and put it on your `PATH`.
-
-**While this repository is private** (true today), the asset needs an authenticated
-request — a plain `curl` gets a 404, indistinguishable from the asset not existing,
-whether or not you're logged in to GitHub anywhere else.
-[`gh`](https://cli.github.com/), already authenticated (`gh auth login`), carries that
-authentication for you:
-
-```sh
-# macOS (Apple Silicon) — swap the pattern for your platform, and the tag for the release
-gh release download vX.Y.Z \
-  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-darwin-arm64.tar.gz"
-tar -xzf ccp-*-darwin-arm64.tar.gz
-sudo mv ccp /usr/local/bin/
-```
-
-**If this repository is ever made public**, a plain `curl` works and needs nothing but a
-shell:
-
-```sh
-# macOS (Apple Silicon) — swap the slug for your platform, and vX.Y.Z for the release
-curl -fsSL -o ccp.tar.gz \
-  https://github.com/giordyreds/claude-code-multi-session/releases/download/vX.Y.Z/ccp-X.Y.Z-darwin-arm64.tar.gz
-tar -xzf ccp.tar.gz
-sudo mv ccp /usr/local/bin/
-```
-
-(It fails with the same 404 today, for the reason above — this isn't a broken command,
-it's what a private repo does to an unauthenticated request.)
+`npm install`. Grab the asset for your platform below and put it on your `PATH`.
 
 | Platform | Asset slug |
 | --- | --- |
@@ -83,7 +72,107 @@ it's what a private repo does to an unauthenticated request.)
 `ccp` itself supports macOS and Linux, bash or zsh (see [Scope](#scope)); the release
 pipeline also builds musl variants of the Linux binaries, for Alpine-style distros.
 
-**On Windows, take `linux-x64` and install it inside your WSL distro** — not the
+**While this repository is private** (true today), the asset needs an authenticated
+request — a plain `curl` gets a 404, indistinguishable from the asset not existing,
+whether or not you're logged in to GitHub anywhere else.
+[`gh`](https://cli.github.com/), already authenticated (`gh auth login`), carries that
+authentication for you — that's the command under each platform below.
+
+**If this repository is ever made public**, a plain `curl` works and needs nothing but a
+shell — that's the collapsed "If this repository is ever made public" block under each
+platform's `gh` command. (It fails with the same 404 today, for the reason above — this
+isn't a broken command, it's what a private repo does to an unauthenticated request.)
+
+In every command below, swap `vX.Y.Z` for the release you want — see
+[Pinning a version](#pinning-a-version) below.
+
+### macOS (Apple Silicon)
+
+```sh
+gh release download vX.Y.Z \
+  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-darwin-arm64.tar.gz"
+tar -xzf ccp-*-darwin-arm64.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+<details>
+<summary>If this repository is ever made public</summary>
+
+```sh
+curl -fsSL -o ccp.tar.gz \
+  https://github.com/giordyreds/claude-code-multi-session/releases/download/vX.Y.Z/ccp-X.Y.Z-darwin-arm64.tar.gz
+tar -xzf ccp.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+</details>
+
+### macOS (Intel)
+
+```sh
+gh release download vX.Y.Z \
+  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-darwin-x64.tar.gz"
+tar -xzf ccp-*-darwin-x64.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+<details>
+<summary>If this repository is ever made public</summary>
+
+```sh
+curl -fsSL -o ccp.tar.gz \
+  https://github.com/giordyreds/claude-code-multi-session/releases/download/vX.Y.Z/ccp-X.Y.Z-darwin-x64.tar.gz
+tar -xzf ccp.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+</details>
+
+### Linux (x64)
+
+```sh
+gh release download vX.Y.Z \
+  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-linux-x64.tar.gz"
+tar -xzf ccp-*-linux-x64.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+<details>
+<summary>If this repository is ever made public</summary>
+
+```sh
+curl -fsSL -o ccp.tar.gz \
+  https://github.com/giordyreds/claude-code-multi-session/releases/download/vX.Y.Z/ccp-X.Y.Z-linux-x64.tar.gz
+tar -xzf ccp.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+</details>
+
+### Linux (arm64)
+
+```sh
+gh release download vX.Y.Z \
+  --repo giordyreds/claude-code-multi-session --pattern "ccp-*-linux-arm64.tar.gz"
+tar -xzf ccp-*-linux-arm64.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+<details>
+<summary>If this repository is ever made public</summary>
+
+```sh
+curl -fsSL -o ccp.tar.gz \
+  https://github.com/giordyreds/claude-code-multi-session/releases/download/vX.Y.Z/ccp-X.Y.Z-linux-arm64.tar.gz
+tar -xzf ccp.tar.gz
+sudo mv ccp /usr/local/bin/
+```
+
+</details>
+
+### Windows (via WSL)
+
+**Take the Linux (x64) command above and run it inside your WSL distro** — not the
 `windows-x64` asset, which exists only to tell you that. Install Claude Code inside the
 distro too, not on the Windows side: WSL puts the Windows `PATH` on your Linux `PATH`, so a
 Windows-side `claude` is reachable from inside the distro and will silently ignore the
@@ -91,7 +180,9 @@ Binding `ccp` gives it. `ccp doctor` names the `claude` it found, so you can che
 you have. See
 [ADR-0013](./docs/adr/0013-windows-is-not-supported-natively-wsl-is-the-windows-story.md).
 
-Then run Setup:
+### Setup
+
+Once the binary is on your `PATH`, on any platform, run Setup:
 
 ```sh
 ccp setup
@@ -120,7 +211,9 @@ if command -v ccp >/dev/null 2>&1; then eval "$(command ccp shell-init)"; fi
 It also adds a `[alias]` segment to your prompt showing which Profile the shell is bound
 to (`[(default)]` when unbound) — see `shell/ccp.sh` for how it hooks `PS1`.
 
-**Pinning a version.** To stay on a known-good combination with an older Claude Code
+### Pinning a version
+
+To stay on a known-good combination with an older Claude Code
 instead of always grabbing the latest release — the entire backward-compatibility
 mechanism this project offers (see
 [ADR-0010](./docs/adr/0010-compatibility-by-observation-not-version-matrix.md)) —
