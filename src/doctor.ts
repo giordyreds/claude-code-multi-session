@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 import type { AuthStatus, ClaudePort } from "./claude-port.js";
-import { isErrnoException } from "./fs-utils.js";
+import { errorMessage, isErrnoException, isPlainObject } from "./fs-utils.js";
 import { formatIdentity, identityKey, type Identity } from "./identity.js";
 import { onboardingSourceReady } from "./onboarding.js";
 import { loadRegistry } from "./registry.js";
@@ -414,10 +414,6 @@ async function isDirectory(path: string): Promise<boolean> {
   }
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 /** The file `ccp doctor` records the Claude Code version its Checks last ran against — a small,
  * dedicated state file under the tool's own state directory, deliberately separate from
  * `registry.json` (`registry.ts`): this records what a run of `ccp doctor` last saw on this
@@ -465,8 +461,4 @@ export async function loadVerifiedVersion(stateDir: string): Promise<string | nu
 export async function recordVerifiedVersion(stateDir: string, version: string): Promise<void> {
   await mkdir(stateDir, { recursive: true });
   await writeFile(verifiedVersionPath(stateDir), `${JSON.stringify({ version }, null, 2)}\n`, "utf8");
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
