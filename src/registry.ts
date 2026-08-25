@@ -1,6 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { isErrnoException } from "./fs-utils.js";
+import { isErrnoException, isPlainObject } from "./fs-utils.js";
 import type { Identity } from "./identity.js";
 import { repairRig } from "./rig.js";
 import { renderSettings } from "./settings.js";
@@ -197,10 +197,6 @@ export async function removeProfile(stateDir: string, alias: string): Promise<Pr
  */
 function isValidAlias(alias: string): boolean {
   return alias.length > 0 && alias !== "." && alias !== ".." && !alias.includes("/") && !alias.includes("\\");
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function validateRegistry(parsed: unknown, path: string): Registry {

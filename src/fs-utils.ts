@@ -11,3 +11,10 @@ export function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/** Renders a caught value as a human-readable message — an `Error`'s `.message`, or the value's
+ * string form for anything else a `catch` block might see. Shared by every module that reports a
+ * caught error back to the user. */
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}

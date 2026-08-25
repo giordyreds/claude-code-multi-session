@@ -4,6 +4,7 @@ import { resolveBinding } from "./binding.js";
 import { ClaudeCliPort, type AuthStatus, type ClaudePort } from "./claude-port.js";
 import { resolveExitCode, runCommand, type CommandRunner } from "./command-runner.js";
 import { ProcessDaemonPort, type DaemonPort } from "./daemon.js";
+import { errorMessage } from "./fs-utils.js";
 import {
   CONTRACT_CLAUDE_ON_PATH,
   CONTRACT_STATE_DIRECTORY,
@@ -310,10 +311,6 @@ async function runWhoami(_args: string[], deps: CliDeps): Promise<number> {
 function reportError(stderr: (line: string) => void, err: unknown): number {
   stderr(errorMessage(err));
   return 1;
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

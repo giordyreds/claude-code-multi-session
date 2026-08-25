@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { isErrnoException, isPlainObject } from "./fs-utils.js";
 import { withProfileStatusLine } from "./status-line.js";
 
 /** A parsed settings file's shape: strict JSON, so every value is JSON-safe. */
@@ -216,10 +217,6 @@ function isGeneratedMarker(value: unknown): value is GeneratedMarker {
   return isPlainObject(value) && isPlainObject(value.snapshot);
 }
 
-function isPlainObject(value: unknown): value is SettingsValue {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
 
@@ -236,8 +233,4 @@ function deepEqual(a: unknown, b: unknown): boolean {
   }
 
   return false;
-}
-
-function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
-  return err instanceof Error && "code" in err;
 }
