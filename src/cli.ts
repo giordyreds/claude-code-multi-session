@@ -113,71 +113,95 @@ export function defaultShellRcPath(env: NodeJS.ProcessEnv): string {
   return join(homedir(), ".bashrc");
 }
 
-export interface RunCliOptions {
+/**
+ * Every subcommand's resolved dependencies, after {@link runCli} has applied defaults — the one
+ * dependency interface every command takes (issue #53). Adding a dependency means editing this
+ * interface (1 field) and `runCli`'s default-resolution block (1 line) — never a command's own
+ * signature, since every command already takes the whole thing.
+ */
+interface CliDeps {
   /** The shell environment to resolve Binding from. Defaults to `process.env`. */
-  env?: NodeJS.ProcessEnv;
-  stdout?: (line: string) => void;
-  stderr?: (line: string) => void;
+  env: NodeJS.ProcessEnv;
+  stdout: (line: string) => void;
+  stderr: (line: string) => void;
   /**
    * Test seam: replaces every invocation of the real `claude` executable (see ADR-0005) so
    * `whoami` — and every future identity-resolving command — is testable without spawning it.
    * Defaults to a real {@link ClaudeCliPort}.
    */
-  claudePort?: ClaudePort;
+  claudePort: ClaudePort;
   /** Test seam: the tool's own state directory, holding the Profile registry and every managed
    * Profile's isolated config directory. Defaults to `~/.ccp`, or `$CCP_HOME` if set. */
-  stateDir?: string;
+  stateDir: string;
   /** Test seam: the Default install's configuration directory — the source of the Rig shared
    * into every newly added Profile (ADR-0007). Defaults to `~/.claude`. */
-  installDir?: string;
+  installDir: string;
   /** Test seam: the Default install's own `.claude.json` — a *file* path, and a sibling of
    * `installDir` rather than something inside it (see {@link defaultInstallStateFilePath}).
    * Source for `ccp login`'s onboarding pre-seed (issue #27). Defaults to `~/.claude.json`. */
-  installStateFilePath?: string;
+  installStateFilePath: string;
   /** Test seam: replaces `ccp rm`'s best-effort daemon cleanup (ADR-0001) so tests never depend
    * on real OS processes. Defaults to a real {@link ProcessDaemonPort}. */
-  daemonPort?: DaemonPort;
+  daemonPort: DaemonPort;
   /**
    * Test seam: replaces the interactive picker `ccp use` shows when invoked with no Alias (see
    * ticket #9). Defaults to a real {@link TtyPicker} reading `process.stdin`, drawing on
    * `process.stderr` — never stdout, per ADR-0004.
    */
-  picker?: Picker;
+  picker: Picker;
   /**
    * Test seam: replaces the real spawn behind `ccp run <alias> -- <command>` (ticket #11), so
    * tests never spawn a real child process. Defaults to a real {@link CommandRunner} that
    * inherits stdio.
    */
-  commandRunner?: CommandRunner;
+  commandRunner: CommandRunner;
   /**
    * Test seam: replaces `ccp login`'s best-effort onboarding pre-seed attempt (issue #27), so
    * tests can exercise its "warn, never fail Login" behaviour without depending on real
    * filesystem permission errors. Defaults to the real {@link seedOnboardingState}.
    */
-  onboardingSeeder?: OnboardingSeeder;
+  onboardingSeeder: OnboardingSeeder;
   /** Test seam: where a state directory under the pre-rename name (issue #31) would live, for
    * `ccp doctor`'s Legacy state directory Check. Defaults to `~/.ccacct`. */
-  legacyStateDir?: string;
+  legacyStateDir: string;
   /** Test seam: the shell startup file `ccp doctor`'s Shell wiring Check reads, and `ccp setup`/
    * `ccp teardown` write to. Defaults to {@link defaultShellRcPath}'s detection from `$SHELL`. */
-  shellRcPath?: string;
+  shellRcPath: string;
   /** Test seam: the platform this invocation runs on, for the Windows hard guard (issue #40).
    * Defaults to `process.platform`. */
-  platform?: string;
+  platform: string;
 }
 
-/** Every subcommand's resolved dependencies, after {@link runCli} has applied defaults. */
-interface CliDeps {
-  env: NodeJS.ProcessEnv;
-  stdout: (line: string) => void;
-  stderr: (line: string) => void;
-  claudePort: ClaudePort;
-  stateDir: string;
-  installDir: string;
-  daemonPort: DaemonPort;
-  picker: Picker;
-  commandRunner: CommandRunner;
-}
+/**
+ * {@link runCli}'s own parameter shape: every {@link CliDeps} field, optional, since `runCli`
+ * resolves whichever ones are omitted to their real-world default before any command runs.
+ * There is no test-only seam left over that doesn't already belong in `CliDeps` — every one of
+ * these fields is a dependency some command actually takes.
+ */
+export type RunCliOptions = Partial<CliDeps>;
+
+/** One subcommand's implementation: `argv` with the command word itself already stripped, plus
+ * the full resolved {@link CliDeps} — the uniform shape every entry in {@link COMMANDS} takes. */
+type Command = (args: string[], deps: CliDeps) => Promise<number>;
+
+/** Dispatch table for `runCli`'s command switch, data rather than a hand-maintained `switch`
+ * (issue #53) — the unknown-command path falls out of a lookup miss instead of needing its own
+ * upkeep alongside this table. */
+const COMMANDS: Record<string, Command> = {
+  setup: runSetup,
+  whoami: runWhoami,
+  add: runAdd,
+  ls: runLs,
+  login: runLogin,
+  use: runUse,
+  "shell-init": runShellInit,
+  run: runRun,
+  reconcile: runReconcile,
+  sync: runSync,
+  doctor: runDoctor,
+  rm: runRm,
+  teardown: runTeardown,
+};
 
 /**
  * Runs the `ccp` CLI for one invocation and resolves its process exit code. The single seam
@@ -235,39 +259,29 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
     return 1;
   }
 
-  const deps: CliDeps = { env, stdout, stderr, claudePort, stateDir, installDir, daemonPort, picker, commandRunner };
+  const deps: CliDeps = {
+    env,
+    stdout,
+    stderr,
+    claudePort,
+    stateDir,
+    installDir,
+    installStateFilePath,
+    daemonPort,
+    picker,
+    commandRunner,
+    onboardingSeeder,
+    legacyStateDir,
+    shellRcPath,
+    platform,
+  };
 
-  switch (argv[0]) {
-    case "setup":
-      return runSetup(argv.slice(1), { env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, shellRcPath, stdout, stderr });
-    case "whoami":
-      return runWhoami(deps);
-    case "add":
-      return runAdd({ alias: argv[1], stateDir, installDir, stdout, stderr });
-    case "ls":
-      return runLs(deps);
-    case "login":
-      return runLogin(argv.slice(1), { stateDir, installDir, installStateFilePath, stdout, stderr, claudePort, onboardingSeeder });
-    case "use":
-      return runUse(argv[1], deps);
-    case "shell-init":
-      return runShellInit(deps);
-    case "run":
-      return runRun(argv.slice(1), deps);
-    case "reconcile":
-      return runReconcile(argv[1], { stateDir, stdout, stderr, claudePort });
-    case "sync":
-      return runSync({ stateDir, installDir, stdout, stderr });
-    case "doctor":
-      return runDoctor({ env, claudePort, stateDir, installDir, installStateFilePath, legacyStateDir, shellRcPath, stdout, stderr });
-    case "rm":
-      return runRm(argv.slice(1), deps);
-    case "teardown":
-      return runTeardown({ shellRcPath, stateDir, stdout, stderr });
-    default:
-      stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
-      return 1;
+  const command = COMMANDS[argv[0]!];
+  if (!command) {
+    stderr(`Unknown command '${argv[0]}'. ${USAGE}`);
+    return 1;
   }
+  return command(argv.slice(1), deps);
 }
 
 /**
@@ -275,7 +289,7 @@ export async function runCli(argv: string[], options: RunCliOptions = {}): Promi
  * An unbound shell reports the Default install's identity under the `(default)` Alias — never a
  * blank — since under ADR-0003 unbound means the Default install, not "no identity".
  */
-async function runWhoami(deps: CliDeps): Promise<number> {
+async function runWhoami(_args: string[], deps: CliDeps): Promise<number> {
   const binding = resolveBinding(deps.env);
   const alias = binding.bound ? binding.alias : DEFAULT_INSTALL_ALIAS;
   const configDir = binding.bound ? binding.configDir : undefined;
@@ -319,18 +333,7 @@ function errorMessage(err: unknown): string {
  * only ever warns, never fails `ccp login` itself, since {@link seedOnboardingState} touches
  * Claude Code's own undocumented state file rather than anything this tool owns.
  */
-async function runLogin(
-  args: string[],
-  deps: {
-    stateDir: string;
-    installDir: string;
-    installStateFilePath: string;
-    stdout: (line: string) => void;
-    stderr: (line: string) => void;
-    claudePort: ClaudePort;
-    onboardingSeeder: OnboardingSeeder;
-  },
-): Promise<number> {
+async function runLogin(args: string[], deps: CliDeps): Promise<number> {
   const alias = args[0];
   if (!alias) {
     deps.stderr(LOGIN_USAGE);
@@ -408,7 +411,7 @@ async function runLogin(
  * warning, never a block: the whole point is that the user finds out *before* running `claude`
  * under the wrong identity, not that Binding refuses to happen.
  */
-async function runUse(aliasArg: string | undefined, deps: CliDeps): Promise<number> {
+async function runUse(args: string[], deps: CliDeps): Promise<number> {
   let registry: Registry;
   try {
     registry = await loadRegistry(deps.stateDir);
@@ -416,7 +419,7 @@ async function runUse(aliasArg: string | undefined, deps: CliDeps): Promise<numb
     return reportError(deps.stderr, err);
   }
 
-  let alias = aliasArg;
+  let alias = args[0];
   if (!alias) {
     const picked = await pickAlias(registry, deps);
     if (picked === undefined) return 1;
@@ -463,7 +466,7 @@ function shellQuote(value: string): string {
  * code exactly like a stray warning on `ccp use`'s stdout would be. The one failure mode —
  * `shell/ccp.sh` missing or unreadable — goes to stderr instead.
  */
-async function runShellInit(deps: { stdout: (line: string) => void; stderr: (line: string) => void }): Promise<number> {
+async function runShellInit(_args: string[], deps: CliDeps): Promise<number> {
   let script: string;
   try {
     script = await shellInitScript();
@@ -604,10 +607,8 @@ async function reportDriftAndUpdateRegistry(
  * {@link ClaudePort.login}, so it can never re-authenticate or open a browser, per ticket #8's
  * acceptance criteria.
  */
-async function runReconcile(
-  alias: string | undefined,
-  deps: { stateDir: string; stdout: (line: string) => void; stderr: (line: string) => void; claudePort: ClaudePort },
-): Promise<number> {
+async function runReconcile(args: string[], deps: CliDeps): Promise<number> {
+  const alias = args[0];
   if (!alias) {
     deps.stderr(RECONCILE_USAGE);
     return 1;
@@ -729,14 +730,8 @@ function formatIdentityReport(alias: string, status: AuthStatus): string {
  * {@link DEFAULT_INSTALL_ALIAS} sentinel — is enforced by {@link addProfile} itself, so a
  * rejection here always means the registry was left exactly as it was.
  */
-async function runAdd(deps: {
-  alias: string | undefined;
-  stateDir: string;
-  installDir: string;
-  stdout: (line: string) => void;
-  stderr: (line: string) => void;
-}): Promise<number> {
-  const { alias } = deps;
+async function runAdd(args: string[], deps: CliDeps): Promise<number> {
+  const alias = args[0];
   if (!alias) {
     deps.stderr("Usage: ccp add <alias>");
     return 1;
@@ -763,7 +758,7 @@ async function runAdd(deps: {
  * own {@link ClaudePort.authStatus} call per Profile: the reported state is stored identity,
  * presented honestly as such, not a live re-check that a token still works.
  */
-async function runLs(deps: CliDeps): Promise<number> {
+async function runLs(_args: string[], deps: CliDeps): Promise<number> {
   let profiles;
   try {
     profiles = (await loadRegistry(deps.stateDir)).profiles;
@@ -868,12 +863,7 @@ async function pickAlias(registry: Registry, deps: CliDeps): Promise<string | un
  * {@link shareRig} before it), and naming it in every Profile's line on every run would turn
  * permanently-normal state into noise that drowns out the one line that actually needs attention.
  */
-async function runSync(deps: {
-  stateDir: string;
-  installDir: string;
-  stdout: (line: string) => void;
-  stderr: (line: string) => void;
-}): Promise<number> {
+async function runSync(_args: string[], deps: CliDeps): Promise<number> {
   let profiles;
   try {
     profiles = (await loadRegistry(deps.stateDir)).profiles;
@@ -975,20 +965,7 @@ const SETUP_FATAL_CONTRACTS = new Set([CONTRACT_CLAUDE_ON_PATH, CONTRACT_STATE_D
  * once the reported problem (a missing `claude`, an unwritable state directory) is fixed, rather
  * than leaving a failed run silent about what to do next.
  */
-async function runSetup(
-  args: string[],
-  deps: {
-    env: NodeJS.ProcessEnv;
-    claudePort: ClaudePort;
-    stateDir: string;
-    installDir: string;
-    installStateFilePath: string;
-    legacyStateDir: string;
-    shellRcPath: string;
-    stdout: (line: string) => void;
-    stderr: (line: string) => void;
-  },
-): Promise<number> {
+async function runSetup(args: string[], deps: CliDeps): Promise<number> {
   if (args.includes("--dry-run")) {
     let present: boolean;
     try {
@@ -1052,12 +1029,7 @@ async function runSetup(
  * silent (this ticket's own acceptance criteria), regardless of whether there was a line to
  * remove this time.
  */
-async function runTeardown(deps: {
-  shellRcPath: string;
-  stateDir: string;
-  stdout: (line: string) => void;
-  stderr: (line: string) => void;
-}): Promise<number> {
+async function runTeardown(_args: string[], deps: CliDeps): Promise<number> {
   let result: { removed: boolean };
   try {
     result = await removeShellWiringLine(deps.shellRcPath);
@@ -1093,17 +1065,7 @@ async function runTeardown(deps: {
  * machine actually passed its Checks against, never merely the version it happened to be running
  * during a broken run.
  */
-async function runDoctor(deps: {
-  env: NodeJS.ProcessEnv;
-  claudePort: ClaudePort;
-  stateDir: string;
-  installDir: string;
-  installStateFilePath: string;
-  legacyStateDir: string;
-  shellRcPath: string;
-  stdout: (line: string) => void;
-  stderr: (line: string) => void;
-}): Promise<number> {
+async function runDoctor(_args: string[], deps: CliDeps): Promise<number> {
   const reports = await runDoctorChecks(deps);
   const allChecksClean = reports.every((report) => report.ok);
 
