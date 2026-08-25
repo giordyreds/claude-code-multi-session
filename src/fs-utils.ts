@@ -18,3 +18,12 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+/** Prints an error's message to `stderr` and resolves the standard failure exit code — the one
+ * shape every command's fallible step reports through. No domain owner of its own (every one of
+ * the CLI's 13 commands calls it), which is why it lives here next to {@link errorMessage} rather
+ * than in any single `commands/*.ts` module. */
+export function reportError(stderr: (line: string) => void, err: unknown): number {
+  stderr(errorMessage(err));
+  return 1;
+}
